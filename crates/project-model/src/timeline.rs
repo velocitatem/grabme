@@ -49,19 +49,14 @@ pub struct CameraKeyframe {
 }
 
 /// Easing function for transitions between keyframes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EasingFunction {
     Linear,
     EaseIn,
     EaseOut,
+    #[default]
     EaseInOut,
-}
-
-impl Default for EasingFunction {
-    fn default() -> Self {
-        Self::EaseInOut
-    }
 }
 
 impl EasingFunction {
@@ -84,17 +79,12 @@ impl EasingFunction {
 }
 
 /// Origin of a keyframe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyframeSource {
+    #[default]
     Auto,
     Manual,
-}
-
-impl Default for KeyframeSource {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// An effect applied during rendering.
@@ -184,18 +174,13 @@ pub struct CutSegment {
 }
 
 /// Why a segment was cut.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CutReason {
+    #[default]
     Manual,
     Silence,
     Idle,
-}
-
-impl Default for CutReason {
-    fn default() -> Self {
-        Self::Manual
-    }
 }
 
 impl Timeline {

@@ -1,0 +1,48 @@
+{
+  "version": "1.0",
+  "name": "recording",
+  "id": "1b908147-fc85-4892-0081-000000000000",
+  "created_at": "2026-02-10T20:27:32.133324464+00:00",
+  "modified_at": "2026-02-10T20:27:32.133324464+00:00",
+  "recording": {
+    "capture_width": 1920,
+    "capture_height": 1080,
+    "fps": 60,
+    "scale_factor": 1.0,
+    "display_server": "wayland",
+    "cursor_hidden": true,
+    "audio_sample_rate": 48000
+  },
+  "tracks": {
+    "screen": {
+      "path": "sources/screen.mkv",
+      "duration_secs": 5.541149642,
+      "codec": "h264",
+      "offset_ns": 0
+    },
+    "webcam": null,
+    "mic": {
+      "path": "sources/mic.wav",
+      "duration_secs": 5.541149642,
+      "codec": "pcm",
+      "offset_ns": 0
+    },
+    "system_audio": {
+      "path": "sources/system.wav",
+      "duration_secs": 5.541149642,
+      "codec": "pcm",
+      "offset_ns": 0
+    },
+    "app_audio": []
+  },
+  "export": {
+    "format": "mp4-h264",
+    "width": 1920,
+    "height": 1080,
+    "fps": 60,
+    "video_bitrate_kbps": 8000,
+    "audio_bitrate_kbps": 192,
+    "aspect_mode": "landscape",
+    "burn_subtitles": false
+  }
+}

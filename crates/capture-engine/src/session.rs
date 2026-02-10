@@ -1,12 +1,12 @@
 //! Recording session management.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use grabme_common::clock::RecordingClock;
 use grabme_common::error::{GrabmeError, GrabmeResult};
-use grabme_project_model::{LoadedProject, RecordingConfig, TrackRef};
+use grabme_project_model::{LoadedProject, TrackRef};
 
 /// Configuration for starting a new recording session.
 #[derive(Debug, Clone)]

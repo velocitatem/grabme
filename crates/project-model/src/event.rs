@@ -174,7 +174,7 @@ pub fn parse_events(jsonl: &str) -> Result<Vec<InputEvent>, serde_json::Error> {
     jsonl
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line))
+        .map(serde_json::from_str)
         .collect()
 }
 

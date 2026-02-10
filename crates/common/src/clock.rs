@@ -97,7 +97,7 @@ impl DriftMeasurement {
 #[derive(Debug)]
 pub struct RateController {
     target_interval_ns: u64,
-    last_tick_ns: u64,
+    last_tick_ns: Option<u64>,
 }
 
 impl RateController {
@@ -105,18 +105,24 @@ impl RateController {
     pub fn new(target_hz: u32) -> Self {
         Self {
             target_interval_ns: 1_000_000_000 / target_hz as u64,
-            last_tick_ns: 0,
+            last_tick_ns: None,
         }
     }
 
     /// Check if enough time has passed for the next tick.
     /// Returns true and updates internal state if ready.
+    /// The first call always returns true.
     pub fn should_tick(&mut self, current_ns: u64) -> bool {
-        if current_ns >= self.last_tick_ns + self.target_interval_ns {
-            self.last_tick_ns = current_ns;
-            true
-        } else {
-            false
+        match self.last_tick_ns {
+            None => {
+                self.last_tick_ns = Some(current_ns);
+                true
+            }
+            Some(last) if current_ns >= last + self.target_interval_ns => {
+                self.last_tick_ns = Some(current_ns);
+                true
+            }
+            _ => false,
         }
     }
 

@@ -1,0 +1,85 @@
+{
+  "version": "1.0",
+  "keyframes": [
+    {
+      "t": 0.0,
+      "viewport": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 1.0
+      },
+      "easing": "ease_in_out",
+      "source": "auto"
+    },
+    {
+      "t": 0.0,
+      "viewport": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.6,
+        "h": 0.6
+      },
+      "easing": "ease_in_out",
+      "source": "auto"
+    },
+    {
+      "t": 2.0,
+      "viewport": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.5499999999999999,
+        "h": 0.5499999999999999
+      },
+      "easing": "ease_in_out",
+      "source": "auto"
+    },
+    {
+      "t": 4.0,
+      "viewport": {
+        "x": 0.14963444444444438,
+        "y": 0.09219361111111107,
+        "w": 0.5499999999999999,
+        "h": 0.5499999999999999
+      },
+      "easing": "ease_in_out",
+      "source": "auto"
+    },
+    {
+      "t": 6.0,
+      "viewport": {
+        "x": 0.2727474999999998,
+        "y": 0.19238611111111112,
+        "w": 0.5499999999999999,
+        "h": 0.5499999999999999
+      },
+      "easing": "ease_in_out",
+      "source": "auto"
+    },
+    {
+      "t": 8.0,
+      "viewport": {
+        "x": 0.3693391666666663,
+        "y": 0.3005775000000001,
+        "w": 0.4,
+        "h": 0.4
+      },
+      "easing": "ease_in_out",
+      "source": "auto"
+    }
+  ],
+  "effects": [
+    {
+      "type": "cursor_smooth",
+      "strength": 0.7
+    }
+  ],
+  "cursor_config": {
+    "smoothing": "ema",
+    "smoothing_factor": 0.3,
+    "size_multiplier": 1.0,
+    "custom_asset": null,
+    "show_click_animation": true
+  },
+  "cuts": []
+}
