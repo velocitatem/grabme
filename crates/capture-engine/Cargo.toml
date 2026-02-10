@@ -1,0 +1,19 @@
+[package]
+name = "grabme-capture-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Screen, webcam, and audio capture engine for GrabMe"
+
+[dependencies]
+grabme-common = { workspace = true }
+grabme-project-model = { workspace = true }
+grabme-platform-linux = { workspace = true }
+grabme-input-tracker = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

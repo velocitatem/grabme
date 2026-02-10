@@ -1,0 +1,15 @@
+[package]
+name = "grabme-project-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Core data model for GrabMe projects: events, timelines, viewports, and project metadata"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

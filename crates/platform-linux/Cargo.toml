@@ -1,0 +1,16 @@
+[package]
+name = "grabme-platform-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Linux platform integration: XDG Portal, PipeWire, DBus, and DPI handling for GrabMe"
+
+[dependencies]
+grabme-common = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

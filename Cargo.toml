@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/project-model",
+    "crates/capture-engine",
+    "crates/input-tracker",
+    "crates/processing-core",
+    "crates/render-engine",
+    "crates/audio-ai",
+    "crates/platform-linux",
+    "tools/grabme-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["GrabMe Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/grabme/grabme"
+
+[workspace.dependencies]
+# Internal crates
+grabme-common = { path = "crates/common" }
+grabme-project-model = { path = "crates/project-model" }
+grabme-capture-engine = { path = "crates/capture-engine" }
+grabme-input-tracker = { path = "crates/input-tracker" }
+grabme-processing-core = { path = "crates/processing-core" }
+grabme-render-engine = { path = "crates/render-engine" }
+grabme-audio-ai = { path = "crates/audio-ai" }
+grabme-platform-linux = { path = "crates/platform-linux" }
+
+# Core dependencies
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.36", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Time and sync
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive", "cargo"] }
+
+# Testing
+proptest = "1.4"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.bench]
+inherits = "release"

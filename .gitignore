@@ -1,0 +1,44 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# GrabMe project files (user data)
+projects/
+
+# Build artifacts
+dist/
+*.wasm
+
+# Tauri
+apps/desktop/src-tauri/target/
+apps/desktop/node_modules/
+apps/desktop/dist/
+
+# AI models (too large for git)
+models/
+*.bin
+*.ggml
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+*.tmp
