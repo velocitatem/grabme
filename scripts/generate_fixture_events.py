@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
-"""Generate synthetic events.jsonl for the sample fixture project.
-
-Simulates a 10-second tutorial recording where the user:
-1. Hovers in the top-left area (0-3s) — should trigger zoom-in
-2. Clicks a button (3s)
-3. Moves to center-right area (3-7s) — should trigger pan
-4. Types some text (5-6s)
-5. Returns to full screen sweep (7-10s) — should trigger zoom-out
-"""
+"""Generate synthetic 10-minute events.jsonl for the sample fixture project."""
 
 import json
 import math
 
 
 def main():
+    duration_secs = 600
+    sample_rate_hz = 60
+    total_samples = duration_secs * sample_rate_hz + 1
+
     events = []
 
     # Header comment
@@ -24,77 +20,70 @@ def main():
         "capture_width": 1920,
         "capture_height": 1080,
         "scale_factor": 1.0,
-        "pointer_sample_rate_hz": 60,
+        "pointer_sample_rate_hz": sample_rate_hz,
     }
 
-    # Phase 1: Hover in top-left (0-3s)
-    for i in range(180):  # 60Hz * 3s
-        t_ns = int(i * (1e9 / 60))
-        # Small jitter around (0.15, 0.15)
-        x = 0.15 + 0.02 * math.sin(i * 0.3)
-        y = 0.15 + 0.02 * math.cos(i * 0.4)
+    for i in range(total_samples):
+        t_ns = int(i * (1e9 / sample_rate_hz))
+        phase = (i // sample_rate_hz) % 60
+
+        if phase < 20:
+            x = 0.15 + 0.02 * math.sin(i * 0.1)
+            y = 0.15 + 0.02 * math.cos(i * 0.13)
+        elif phase < 40:
+            p = (phase - 20) / 20.0
+            x = 0.15 + (0.72 - 0.15) * p + 0.01 * math.sin(i * 0.2)
+            y = 0.15 + (0.52 - 0.15) * p + 0.01 * math.cos(i * 0.25)
+        else:
+            p = (phase - 40) / 20.0
+            x = 0.72 + (0.48 - 0.72) * p + 0.04 * math.sin(i * 0.08)
+            y = 0.52 + (0.48 - 0.52) * p + 0.04 * math.cos(i * 0.08)
+
+        x = max(0.0, min(1.0, x))
+        y = max(0.0, min(1.0, y))
         events.append(
             {"t": t_ns, "type": "pointer", "x": round(x, 4), "y": round(y, 4)}
         )
 
-    # Click at 3s
-    t_click = int(3e9)
-    events.append(
-        {
-            "t": t_click,
-            "type": "click",
-            "button": "left",
-            "state": "down",
-            "x": 0.15,
-            "y": 0.15,
-        }
-    )
-    events.append(
-        {
-            "t": t_click + 100000000,
-            "type": "click",
-            "button": "left",
-            "state": "up",
-            "x": 0.15,
-            "y": 0.15,
-        }
-    )
+        if i % (sample_rate_hz * 5) == 0:
+            events.append(
+                {
+                    "t": t_ns,
+                    "type": "click",
+                    "button": "left",
+                    "state": "down",
+                    "x": round(x, 4),
+                    "y": round(y, 4),
+                }
+            )
+            events.append(
+                {
+                    "t": t_ns + 80_000_000,
+                    "type": "click",
+                    "button": "left",
+                    "state": "up",
+                    "x": round(x, 4),
+                    "y": round(y, 4),
+                }
+            )
 
-    # Phase 2: Move to center-right (3-7s)
-    for i in range(240):  # 60Hz * 4s
-        t_ns = int(3e9 + i * (1e9 / 60))
-        progress = i / 240
-        x = 0.15 + (0.7 - 0.15) * progress + 0.01 * math.sin(i * 0.5)
-        y = 0.15 + (0.5 - 0.15) * progress + 0.01 * math.cos(i * 0.6)
-        events.append(
-            {"t": t_ns, "type": "pointer", "x": round(x, 4), "y": round(y, 4)}
-        )
-
-    # Type some text (5-6s)
-    keys = "hello"
-    for i, key in enumerate(keys):
-        t_ns = int(5e9 + i * 200000000)  # 200ms between keys
-        events.append(
-            {"t": t_ns, "type": "key", "code": f"Key{key.upper()}", "state": "down"}
-        )
-        events.append(
-            {
-                "t": t_ns + 50000000,
-                "type": "key",
-                "code": f"Key{key.upper()}",
-                "state": "up",
-            }
-        )
-
-    # Phase 3: Full screen sweep (7-10s)
-    for i in range(180):  # 60Hz * 3s
-        t_ns = int(7e9 + i * (1e9 / 60))
-        progress = i / 180
-        x = 0.7 * (1 - progress) + 0.5 * progress + 0.05 * math.sin(i * 0.2)
-        y = 0.5 * (1 - progress) + 0.5 * progress + 0.05 * math.cos(i * 0.3)
-        events.append(
-            {"t": t_ns, "type": "pointer", "x": round(x, 4), "y": round(y, 4)}
-        )
+        if i % (sample_rate_hz * 3) == 0:
+            events.append(
+                {
+                    "t": t_ns,
+                    "type": "key",
+                    "code": "KeyA",
+                    "state": "down",
+                }
+            )
+            events.append(
+                {
+                    "t": t_ns + 40_000_000,
+                    "type": "key",
+                    "code": "KeyA",
+                    "state": "up",
+                }
+            )
 
     # Sort by timestamp
     events.sort(key=lambda e: e["t"])
@@ -106,7 +95,9 @@ def main():
         for event in events:
             f.write(json.dumps(event) + "\n")
 
-    print(f"Generated {len(events)} events to {output_path}")
+    print(
+        f"Generated {len(events)} events ({duration_secs}s @ {sample_rate_hz}Hz) to {output_path}"
+    )
 
 
 if __name__ == "__main__":

@@ -77,6 +77,34 @@ enum Commands {
         /// Enable vertical/social mode (9:16)
         #[arg(long)]
         vertical: bool,
+
+        /// Hover zoom viewport size (lower = tighter zoom)
+        #[arg(long, default_value = "0.4")]
+        hover_zoom: f64,
+
+        /// Scan zoom viewport size (higher = wider framing)
+        #[arg(long, default_value = "0.85")]
+        scan_zoom: f64,
+
+        /// Dwell radius threshold (normalized)
+        #[arg(long, default_value = "0.15")]
+        dwell_radius: f64,
+
+        /// Dwell velocity threshold (normalized units/sec)
+        #[arg(long, default_value = "0.18")]
+        dwell_velocity: f64,
+
+        /// Smoothing window for generated camera keyframes
+        #[arg(long, default_value = "3")]
+        smooth_window: usize,
+
+        /// Number of monitors packed in the capture region
+        #[arg(long, default_value = "1")]
+        monitor_count: usize,
+
+        /// Zero-based focused monitor index
+        #[arg(long, default_value = "0")]
+        focused_monitor: usize,
     },
 
     /// Export a project to video
@@ -149,15 +177,31 @@ async fn main() -> anyhow::Result<()> {
             no_mic,
             no_system_audio,
             webcam,
-        } => {
-            commands::record::run(name, output, fps, !no_mic, !no_system_audio, webcam).await
-        }
+        } => commands::record::run(name, output, fps, !no_mic, !no_system_audio, webcam).await,
         Commands::Validate { path } => commands::validate::run(path),
         Commands::Analyze {
             path,
             chunk_secs,
             vertical,
-        } => commands::analyze::run(path, chunk_secs, vertical),
+            hover_zoom,
+            scan_zoom,
+            dwell_radius,
+            dwell_velocity,
+            smooth_window,
+            monitor_count,
+            focused_monitor,
+        } => commands::analyze::run(
+            path,
+            chunk_secs,
+            vertical,
+            hover_zoom,
+            scan_zoom,
+            dwell_radius,
+            dwell_velocity,
+            smooth_window,
+            monitor_count,
+            focused_monitor,
+        ),
         Commands::Export {
             path,
             output,

@@ -7,7 +7,19 @@ use grabme_processing_core::cursor_smooth::{CursorSmoother, SmoothingAlgorithm};
 use grabme_project_model::event::parse_events;
 use grabme_project_model::LoadedProject;
 
-pub fn run(path: PathBuf, chunk_secs: f64, vertical: bool) -> anyhow::Result<()> {
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    path: PathBuf,
+    chunk_secs: f64,
+    vertical: bool,
+    hover_zoom: f64,
+    scan_zoom: f64,
+    dwell_radius: f64,
+    dwell_velocity: f64,
+    smooth_window: usize,
+    monitor_count: usize,
+    focused_monitor: usize,
+) -> anyhow::Result<()> {
     println!("Analyzing project at: {}", path.display());
 
     let mut project =
@@ -55,6 +67,13 @@ pub fn run(path: PathBuf, chunk_secs: f64, vertical: bool) -> anyhow::Result<()>
         println!("  Running auto-zoom analysis (chunk={chunk_secs}s)...");
         let config = AutoZoomConfig {
             chunk_duration_secs: chunk_secs,
+            hover_zoom,
+            scan_zoom,
+            dwell_radius,
+            dwell_velocity_threshold: dwell_velocity,
+            smoothing_window: smooth_window,
+            monitor_count,
+            focused_monitor_index: focused_monitor,
             ..Default::default()
         };
         let analyzer = AutoZoomAnalyzer::new(config);

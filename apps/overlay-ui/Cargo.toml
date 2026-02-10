@@ -1,0 +1,20 @@
+[package]
+name = "grabme-overlay-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Native Rust floating overlay editor for GrabMe"
+
+[[bin]]
+name = "grabme-overlay"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+grabme-capture-engine = { workspace = true }
+grabme-processing-core = { workspace = true }
+grabme-project-model = { workspace = true }
+grabme-render-engine = { workspace = true }
+tokio = { workspace = true }
+
+eframe = { version = "0.27", default-features = true }

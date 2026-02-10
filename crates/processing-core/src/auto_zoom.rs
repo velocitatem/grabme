@@ -39,6 +39,16 @@ pub struct AutoZoomConfig {
 
     /// Minimum zoom level (viewport size). Prevents extreme zoom-in.
     pub min_viewport_size: f64,
+
+    /// Maximum velocity considered "dwell" (normalized units per second).
+    pub dwell_velocity_threshold: f64,
+
+    /// Expected monitor count for ultra-wide or multi-monitor captures.
+    /// Used with `focused_monitor_index` to keep analysis on one monitor region.
+    pub monitor_count: usize,
+
+    /// Zero-based monitor index to focus.
+    pub focused_monitor_index: usize,
 }
 
 impl Default for AutoZoomConfig {
@@ -51,6 +61,9 @@ impl Default for AutoZoomConfig {
             scan_zoom: 0.85,
             smoothing_window: 3,
             min_viewport_size: 0.25,
+            dwell_velocity_threshold: 0.18,
+            monitor_count: 1,
+            focused_monitor_index: 0,
         }
     }
 }
@@ -103,13 +116,20 @@ impl AutoZoomAnalyzer {
 
     /// Analyze events and generate a timeline with camera keyframes.
     pub fn analyze(&self, events: &[InputEvent]) -> Timeline {
+        let (timeline, _) = self.analyze_with_chunks(events);
+        timeline
+    }
+
+    /// Analyze events and return both timeline and chunk diagnostics.
+    pub fn analyze_with_chunks(&self, events: &[InputEvent]) -> (Timeline, Vec<ChunkAnalysis>) {
         let chunks = self.chunk_events(events);
         let raw_keyframes = self.generate_raw_keyframes(&chunks);
         let smoothed = self.smooth_keyframes(&raw_keyframes);
 
         let mut timeline = Timeline::new();
         timeline.keyframes = smoothed;
-        timeline
+
+        (timeline, chunks)
     }
 
     /// Chunk events into time windows and compute per-chunk statistics.
@@ -118,8 +138,13 @@ impl AutoZoomAnalyzer {
             return vec![];
         }
 
-        let start_ns = events[0].timestamp_ns;
-        let end_ns = events.last().unwrap().timestamp_ns;
+        let focused_events = self.apply_focus_monitor_filter(events);
+        if focused_events.is_empty() {
+            return vec![];
+        }
+
+        let start_ns = focused_events[0].timestamp_ns;
+        let end_ns = focused_events.last().unwrap().timestamp_ns;
         let chunk_ns = (self.config.chunk_duration_secs * 1e9) as u64;
 
         let mut chunks = vec![];
@@ -129,7 +154,7 @@ impl AutoZoomAnalyzer {
             let chunk_end = chunk_start + chunk_ns;
 
             // Collect pointer positions in this chunk
-            let positions: Vec<(f64, f64)> = events
+            let positions: Vec<(f64, f64)> = focused_events
                 .iter()
                 .filter(|e| e.timestamp_ns >= chunk_start && e.timestamp_ns < chunk_end)
                 .filter_map(|e| e.pointer_position())
@@ -153,7 +178,9 @@ impl AutoZoomAnalyzer {
                 let spread = Self::compute_spread(&positions, centroid);
                 let velocity = Self::compute_velocity(&positions, self.config.chunk_duration_secs);
 
-                let activity = if spread <= self.config.dwell_radius {
+                let activity = if spread <= self.config.dwell_radius
+                    && velocity <= self.config.dwell_velocity_threshold
+                {
                     ActivityType::Dwell
                 } else {
                     ActivityType::Scan
@@ -179,6 +206,7 @@ impl AutoZoomAnalyzer {
     /// Generate raw keyframes from chunk analysis.
     fn generate_raw_keyframes(&self, chunks: &[ChunkAnalysis]) -> Vec<CameraKeyframe> {
         let mut keyframes = vec![];
+        let mut dwell_streak_secs = 0.0;
 
         // Always start with full viewport
         keyframes.push(CameraKeyframe {
@@ -189,7 +217,20 @@ impl AutoZoomAnalyzer {
         });
 
         for chunk in chunks {
-            let viewport_size = match chunk.activity {
+            dwell_streak_secs = match chunk.activity {
+                ActivityType::Dwell => dwell_streak_secs + (chunk.end_secs - chunk.start_secs),
+                _ => 0.0,
+            };
+
+            let activity = if chunk.activity == ActivityType::Dwell
+                && dwell_streak_secs >= self.config.dwell_threshold_secs
+            {
+                ActivityType::Dwell
+            } else {
+                chunk.activity
+            };
+
+            let viewport_size = match activity {
                 ActivityType::Dwell => self.config.hover_zoom.max(self.config.min_viewport_size),
                 ActivityType::Scan => self.config.scan_zoom,
                 ActivityType::Idle => continue, // skip idle chunks
@@ -202,12 +243,25 @@ impl AutoZoomAnalyzer {
                 viewport_size,
             );
 
-            keyframes.push(CameraKeyframe {
+            let keyframe = CameraKeyframe {
                 time_secs: chunk.start_secs,
                 viewport,
                 easing: EasingFunction::EaseInOut,
                 source: KeyframeSource::Auto,
-            });
+            };
+
+            if keyframes
+                .last()
+                .map(|existing| {
+                    (existing.time_secs - keyframe.time_secs).abs() < 1e-6
+                        && existing.viewport == keyframe.viewport
+                })
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            keyframes.push(keyframe);
         }
 
         keyframes
@@ -286,6 +340,33 @@ impl AutoZoomAnalyzer {
             .sum();
 
         total_distance / duration_secs
+    }
+
+    fn apply_focus_monitor_filter<'a>(&self, events: &'a [InputEvent]) -> Vec<&'a InputEvent> {
+        if self.config.monitor_count <= 1 {
+            return events.iter().collect();
+        }
+
+        let monitor_count = self.config.monitor_count.max(1);
+        let focused_monitor_index = self
+            .config
+            .focused_monitor_index
+            .min(monitor_count.saturating_sub(1));
+
+        let slot_width = 1.0 / monitor_count as f64;
+        let min_x = focused_monitor_index as f64 * slot_width;
+        let max_x = (focused_monitor_index + 1) as f64 * slot_width;
+
+        events
+            .iter()
+            .filter(|event| {
+                if let Some((x, _)) = event.pointer_position() {
+                    x >= min_x && x <= max_x
+                } else {
+                    true
+                }
+            })
+            .collect()
     }
 }
 
@@ -410,5 +491,43 @@ mod tests {
             smoothed.last().unwrap().viewport,
             keyframes.last().unwrap().viewport
         );
+    }
+
+    #[test]
+    fn test_monitor_focus_filters_other_regions() {
+        let events = make_pointer_events(&[
+            (0, 0.1, 0.2),
+            (500_000_000, 0.15, 0.25),
+            (1_000_000_000, 0.75, 0.8),
+            (1_500_000_000, 0.8, 0.82),
+        ]);
+
+        let analyzer = AutoZoomAnalyzer::new(AutoZoomConfig {
+            monitor_count: 2,
+            focused_monitor_index: 0,
+            ..Default::default()
+        });
+
+        let chunks = analyzer.chunk_events(&events);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|chunk| chunk.centroid.0 <= 0.5));
+    }
+
+    #[test]
+    fn test_dwell_velocity_threshold_prevents_false_zoom() {
+        let events = make_pointer_events(&[
+            (0, 0.0, 0.0),
+            (500_000_000, 0.5, 0.5),
+            (1_000_000_000, 1.0, 1.0),
+        ]);
+
+        let analyzer = AutoZoomAnalyzer::new(AutoZoomConfig {
+            dwell_radius: 0.8,
+            dwell_velocity_threshold: 0.05,
+            ..Default::default()
+        });
+
+        let chunks = analyzer.chunk_events(&events);
+        assert_eq!(chunks[0].activity, ActivityType::Scan);
     }
 }

@@ -9,8 +9,11 @@
 //! All inputs are data; all outputs are data.
 
 pub mod auto_zoom;
+pub mod camera_preview;
 pub mod cursor_smooth;
+pub mod heatmap;
 pub mod vertical;
 
 pub use auto_zoom::AutoZoomAnalyzer;
+pub use camera_preview::simulate_camera_motion;
 pub use cursor_smooth::CursorSmoother;

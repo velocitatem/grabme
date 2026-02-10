@@ -12,6 +12,11 @@
 //! 4. Start the stream → receive a PipeWire node ID
 //! 5. Connect to PipeWire and receive video frames
 
+use ashpd::desktop::screencast::{
+    CursorMode as AshCursorMode, Screencast, SourceType as AshSourceType,
+};
+use ashpd::desktop::PersistMode;
+use ashpd::WindowIdentifier;
 use grabme_common::error::{GrabmeError, GrabmeResult};
 
 /// Cursor mode for screen capture.
@@ -29,9 +34,9 @@ impl CursorMode {
     /// Convert to the portal's integer representation.
     pub fn to_portal_value(&self) -> u32 {
         match self {
-            CursorMode::Hidden => 1,    // CURSOR_MODE_HIDDEN
-            CursorMode::Embedded => 2,  // CURSOR_MODE_EMBEDDED
-            CursorMode::Metadata => 4,  // CURSOR_MODE_METADATA
+            CursorMode::Hidden => 1,   // CURSOR_MODE_HIDDEN
+            CursorMode::Embedded => 2, // CURSOR_MODE_EMBEDDED
+            CursorMode::Metadata => 4, // CURSOR_MODE_METADATA
         }
     }
 }
@@ -77,23 +82,60 @@ pub async fn request_screencast(
         "Requesting XDG ScreenCast session"
     );
 
-    // TODO: Phase 1 implementation:
-    // 1. Connect to DBus session bus
-    // 2. Call org.freedesktop.portal.ScreenCast.CreateSession
-    // 3. Call SelectSources with cursor_mode and source_type
-    // 4. Call Start to get PipeWire node ID
-    // 5. Return session info
+    let proxy = Screencast::new().await.map_err(|e| {
+        GrabmeError::platform(format!("Failed to connect to XDG ScreenCast portal: {e}"))
+    })?;
 
-    Err(GrabmeError::unsupported(
-        "XDG Portal integration will be implemented in Phase 1",
-    ))
+    let session = proxy
+        .create_session()
+        .await
+        .map_err(|e| GrabmeError::platform(format!("Portal CreateSession failed: {e}")))?;
+
+    proxy
+        .select_sources(
+            &session,
+            map_cursor_mode(cursor_mode),
+            map_source_type(source_type).into(),
+            false,
+            None,
+            PersistMode::DoNot,
+        )
+        .await
+        .map_err(|e| GrabmeError::platform(format!("Portal SelectSources failed: {e}")))?;
+
+    let response = proxy
+        .start(&session, &WindowIdentifier::default())
+        .await
+        .map_err(|e| GrabmeError::platform(format!("Portal Start failed: {e}")))?;
+
+    let streams = response
+        .response()
+        .map_err(|e| GrabmeError::platform(format!("Portal start response failed: {e}")))?;
+
+    let stream = streams
+        .streams()
+        .first()
+        .ok_or_else(|| GrabmeError::platform("Portal returned no screencast streams"))?;
+
+    let (width, height) = stream
+        .size()
+        .map(|(w, h)| (w as u32, h as u32))
+        .unwrap_or((1920, 1080));
+
+    Ok(PortalSession {
+        pipewire_node_id: stream.pipe_wire_node_id(),
+        width,
+        height,
+        session_handle: format!("{session:?}"),
+    })
 }
 
 /// Close an active portal session.
 pub async fn close_session(session_handle: &str) -> GrabmeResult<()> {
     tracing::info!(handle = session_handle, "Closing portal session");
 
-    // TODO: Close the DBus session
+    // Session lifecycle is managed by ashpd request objects and process scope.
+    // If needed, explicit session management can be added later.
     Ok(())
 }
 
@@ -105,4 +147,19 @@ pub fn is_portal_available() -> bool {
         || std::env::var("XDG_SESSION_TYPE")
             .map(|v| v == "wayland")
             .unwrap_or(false)
+}
+
+fn map_cursor_mode(mode: CursorMode) -> AshCursorMode {
+    match mode {
+        CursorMode::Hidden => AshCursorMode::Hidden,
+        CursorMode::Embedded => AshCursorMode::Embedded,
+        CursorMode::Metadata => AshCursorMode::Metadata,
+    }
+}
+
+fn map_source_type(source_type: SourceType) -> AshSourceType {
+    match source_type {
+        SourceType::Monitor => AshSourceType::Monitor,
+        SourceType::Window => AshSourceType::Window,
+    }
 }

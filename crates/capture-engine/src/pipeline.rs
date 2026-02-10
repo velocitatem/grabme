@@ -3,7 +3,13 @@
 //! This module will contain the actual GStreamer pipeline setup.
 //! For now it defines the trait interface that the session uses.
 
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+
 use grabme_common::error::GrabmeResult;
+use gst::prelude::*;
+use gstreamer as gst;
 
 /// Trait for a media capture pipeline.
 ///
@@ -56,11 +62,164 @@ impl PipelineStats {
     }
 }
 
-// Placeholder: GStreamer screen capture pipeline
-// Will be implemented in Phase 1 with actual gstreamer-rs bindings
+pub struct GstCapturePipeline {
+    name: String,
+    pipeline: gst::Pipeline,
+    running: Arc<AtomicBool>,
+    stats: PipelineStats,
+}
 
-// Placeholder: PipeWire audio capture pipeline
-// Will be implemented in Phase 1
+impl GstCapturePipeline {
+    pub fn from_launch(name: impl Into<String>, launch: &str) -> GrabmeResult<Self> {
+        init_gstreamer()?;
 
-// Placeholder: V4L2 webcam capture pipeline
-// Will be implemented in Phase 2
+        let element = gst::parse::launch(launch).map_err(|e| {
+            grabme_common::error::GrabmeError::capture(format!("Failed to build pipeline: {e}"))
+        })?;
+
+        let pipeline = element.dynamic_cast::<gst::Pipeline>().map_err(|_| {
+            grabme_common::error::GrabmeError::capture("Launch string did not produce a pipeline")
+        })?;
+
+        Ok(Self {
+            name: name.into(),
+            pipeline,
+            running: Arc::new(AtomicBool::new(false)),
+            stats: PipelineStats::default(),
+        })
+    }
+}
+
+impl CapturePipeline for GstCapturePipeline {
+    fn start(&mut self) -> GrabmeResult<()> {
+        self.pipeline.set_state(gst::State::Playing).map_err(|e| {
+            grabme_common::error::GrabmeError::capture(format!(
+                "Failed to start {} pipeline: {e:?}",
+                self.name
+            ))
+        })?;
+        self.running.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn stop(&mut self) -> GrabmeResult<()> {
+        self.pipeline.set_state(gst::State::Null).map_err(|e| {
+            grabme_common::error::GrabmeError::capture(format!(
+                "Failed to stop {} pipeline: {e:?}",
+                self.name
+            ))
+        })?;
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn pause(&mut self) -> GrabmeResult<()> {
+        self.pipeline.set_state(gst::State::Paused).map_err(|e| {
+            grabme_common::error::GrabmeError::capture(format!(
+                "Failed to pause {} pipeline: {e:?}",
+                self.name
+            ))
+        })?;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> GrabmeResult<()> {
+        self.pipeline.set_state(gst::State::Playing).map_err(|e| {
+            grabme_common::error::GrabmeError::capture(format!(
+                "Failed to resume {} pipeline: {e:?}",
+                self.name
+            ))
+        })?;
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    fn stats(&self) -> PipelineStats {
+        self.stats.clone()
+    }
+}
+
+pub fn build_screen_pipeline(
+    pipewire_node_id: u32,
+    output_path: &Path,
+    fps: u32,
+) -> GrabmeResult<Box<dyn CapturePipeline>> {
+    let path = escape_path(output_path);
+    let launch = format!(
+        "pipewiresrc path={pipewire_node_id} do-timestamp=true ! videoconvert ! videorate ! video/x-raw,framerate={fps}/1 ! x264enc tune=zerolatency speed-preset=veryfast ! matroskamux ! filesink location=\"{path}\""
+    );
+    Ok(Box::new(GstCapturePipeline::from_launch(
+        "screen", &launch,
+    )?))
+}
+
+pub fn build_x11_screen_pipeline(
+    output_path: &Path,
+    fps: u32,
+    hide_cursor: bool,
+) -> GrabmeResult<Box<dyn CapturePipeline>> {
+    let path = escape_path(output_path);
+    let show_pointer = if hide_cursor { "false" } else { "true" };
+    let launch = format!(
+        "ximagesrc use-damage=false show-pointer={show_pointer} ! videoconvert ! videorate ! video/x-raw,framerate={fps}/1 ! x264enc tune=zerolatency speed-preset=veryfast ! matroskamux ! filesink location=\"{path}\""
+    );
+    Ok(Box::new(GstCapturePipeline::from_launch(
+        "screen-x11",
+        &launch,
+    )?))
+}
+
+pub fn build_mic_pipeline(
+    output_path: &Path,
+    sample_rate: u32,
+) -> GrabmeResult<Box<dyn CapturePipeline>> {
+    let path = escape_path(output_path);
+    let launch = format!(
+        "pipewiresrc do-timestamp=true ! audioconvert ! audioresample ! audio/x-raw,rate={sample_rate} ! wavenc ! filesink location=\"{path}\""
+    );
+    Ok(Box::new(GstCapturePipeline::from_launch("mic", &launch)?))
+}
+
+pub fn build_x11_mic_pipeline(
+    output_path: &Path,
+    sample_rate: u32,
+) -> GrabmeResult<Box<dyn CapturePipeline>> {
+    let path = escape_path(output_path);
+    let launch = format!(
+        "pulsesrc do-timestamp=true ! audioconvert ! audioresample ! audio/x-raw,rate={sample_rate} ! wavenc ! filesink location=\"{path}\""
+    );
+    Ok(Box::new(GstCapturePipeline::from_launch(
+        "mic-x11", &launch,
+    )?))
+}
+
+pub fn build_system_audio_pipeline(
+    output_path: &Path,
+    sample_rate: u32,
+) -> GrabmeResult<Box<dyn CapturePipeline>> {
+    let path = escape_path(output_path);
+    let launch = format!(
+        "pipewiresrc do-timestamp=true stream-properties=props,media.class=Audio/Source ! audioconvert ! audioresample ! audio/x-raw,rate={sample_rate} ! wavenc ! filesink location=\"{path}\""
+    );
+    Ok(Box::new(GstCapturePipeline::from_launch(
+        "system", &launch,
+    )?))
+}
+
+fn init_gstreamer() -> GrabmeResult<()> {
+    static GST_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+    let init_res = GST_INIT.get_or_init(|| gst::init().map_err(|e| e.to_string()));
+    match init_res {
+        Ok(()) => Ok(()),
+        Err(e) => Err(grabme_common::error::GrabmeError::capture(format!(
+            "Failed to initialize GStreamer: {e}"
+        ))),
+    }
+}
+
+fn escape_path(path: &Path) -> String {
+    path.to_string_lossy().replace('"', "\\\"")
+}

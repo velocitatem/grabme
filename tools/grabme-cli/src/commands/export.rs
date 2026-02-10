@@ -2,9 +2,9 @@
 
 use std::path::PathBuf;
 
-use grabme_project_model::project::{ExportConfig, ExportFormat, AspectMode};
+use grabme_project_model::project::{AspectMode, ExportConfig, ExportFormat};
 use grabme_project_model::LoadedProject;
-use grabme_render_engine::export::{ExportJob, ExportProgress, export_project};
+use grabme_render_engine::export::{export_project, ExportJob, ExportProgress};
 
 pub async fn run(
     path: PathBuf,
@@ -15,8 +15,8 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     println!("Exporting project at: {}", path.display());
 
-    let project = LoadedProject::load(&path)
-        .map_err(|e| anyhow::anyhow!("Failed to load project: {e}"))?;
+    let project =
+        LoadedProject::load(&path).map_err(|e| anyhow::anyhow!("Failed to load project: {e}"))?;
 
     let output_path = output.unwrap_or_else(|| path.join("exports").join("output.mp4"));
 
@@ -71,7 +71,6 @@ pub async fn run(
         }
         Err(e) => {
             println!("\nExport failed: {e}");
-            println!("Note: The export pipeline is not yet fully implemented (Phase 4).");
         }
     }
 

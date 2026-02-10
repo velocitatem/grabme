@@ -10,40 +10,42 @@
 - [ ] CI pipeline setup
 
 ## Phase 1: Recorder POC (Week 3-5)
-- [ ] XDG Desktop Portal integration (DBus → PipeWire node)
-- [ ] GStreamer pipeline for PipeWire screen capture
-- [ ] Screen capture with `cursor_mode=hidden`
-- [ ] Audio capture (mic + system via PipeWire monitor)
-- [ ] evdev input backend for mouse tracking
-- [ ] Clock synchronization validation (drift <100ms)
-- [ ] 10-minute test recording fixture
+- [x] XDG Desktop Portal integration (DBus → PipeWire node)
+- [x] GStreamer pipeline for PipeWire screen capture
+- [x] Screen capture with `cursor_mode=hidden`
+- [x] Audio capture (mic + system via PipeWire monitor)
+- [x] evdev input backend for mouse tracking
+- [x] Clock synchronization validation (drift <100ms)
+- [x] 10-minute test recording fixture
 
 ## Phase 2: Playback + Synthetic Cursor (Week 6-8)
-- [ ] Tauri v2 app scaffold
-- [ ] React frontend with video player
-- [ ] Event-driven cursor overlay (`<canvas>` or `<div>`)
-- [ ] Cursor smoothing controls in UI
-- [ ] EMA / Bezier / Kalman algorithm selection
-- [ ] SVG cursor assets and high-res switching
-- [ ] Click animation rendering
+- [x] Tauri v2 app scaffold
+- [x] React frontend with video player
+- [x] Event-driven cursor overlay (`<canvas>` or `<div>`)
+- [x] Cursor smoothing controls in UI
+- [x] EMA / Bezier / Kalman algorithm selection
+- [x] SVG cursor assets and high-res switching
+- [x] Click animation rendering
 
 ## Phase 3: Auto-Director (Week 9-12)
-- [ ] Heatmap visualization in UI
-- [ ] Auto-zoom keyframe generation with tunable params
-- [ ] Camera motion preview (CSS transform simulation)
-- [ ] Manual keyframe editor (drag/drop on timeline)
-- [ ] Vertical (9:16) mode with cursor-centered framing
-- [ ] Golden tests for Auto-Director with fixture data
+- [x] Redesign the UI into a fully native Rust floating overlay (no Tauri runtime)
+- [x] Heatmap visualization
+- [x] Auto-zoom keyframe generation with tunable params
+- [x] Camera motion preview (CSS transform simulation)
+- [x] Manual keyframe editor (drag/drop on timeline)
+- [x] Vertical (9:16) mode with cursor-centered framing
+- [x] Golden tests for Auto-Director with fixture data
+- [x] For edge cases of multiple monitors always focus on one monitor (the one in focus)
 
 ## Phase 4: Export Engine (Week 13-16)
-- [ ] GStreamer/FFmpeg render pipeline
-- [ ] Crop/scale from zoom keyframes
-- [ ] Cursor sprite overlay at smoothed coordinates
-- [ ] Webcam compositing
-- [ ] H.264 MP4 output
-- [ ] H.265 MP4 output
-- [ ] Export progress reporting
-- [ ] Visual verification against preview
+- [x] GStreamer/FFmpeg render pipeline
+- [x] Crop/scale from zoom keyframes
+- [x] Cursor sprite overlay at smoothed coordinates
+- [x] Webcam compositing
+- [x] H.264 MP4 output
+- [x] H.265 MP4 output
+- [x] Export progress reporting
+- [x] Visual verification against preview
 
 ## Phase 5: Audio Intelligence (Week 17-20)
 - [ ] whisper.cpp / whisper.rs integration

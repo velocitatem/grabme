@@ -82,6 +82,8 @@ impl InputTracker {
         while !self.stop_flag.load(Ordering::Relaxed) {
             match self.backend.poll() {
                 Ok(Some(event)) => {
+                    let mut event = event;
+                    event.timestamp_ns = self.clock.elapsed_ns();
                     self.writer.write_event(&event)?;
                     self.events_logged += 1;
                 }

@@ -1,0 +1,106 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  font-family: "Iosevka", "IBM Plex Mono", monospace;
+}
+
+.overlay-root {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  background: transparent;
+}
+
+.cursor {
+  position: absolute;
+  pointer-events: none;
+  z-index: 10;
+  transition: left 70ms linear, top 70ms linear;
+}
+
+.click {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  transform: translate(-50%, -50%);
+  border: 2px solid #d8fff2;
+  border-radius: 50%;
+  animation: ping 220ms linear forwards;
+  pointer-events: none;
+  z-index: 9;
+}
+
+.hud-toggle {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #ffffff55;
+  border-radius: 6px;
+  background: #00000077;
+  color: #fff;
+  z-index: 20;
+}
+
+.hud {
+  position: absolute;
+  top: 44px;
+  left: 8px;
+  width: min(420px, calc(100vw - 16px));
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #ffffff44;
+  border-radius: 8px;
+  background: #00000088;
+  color: #fff;
+  z-index: 20;
+}
+
+.hud input,
+.hud select,
+.hud button {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid #ffffff44;
+  border-radius: 6px;
+  padding: 4px 6px;
+  background: #00000044;
+  color: #fff;
+  font: inherit;
+}
+
+.hud small {
+  opacity: 0.9;
+}
+
+.hud .error {
+  color: #ffd0d0;
+}
+
+@keyframes ping {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.8);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.6);
+  }
+}

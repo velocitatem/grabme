@@ -11,3 +11,4 @@ pub mod permissions;
 pub mod portal;
 
 pub use display::*;
+pub use portal::*;

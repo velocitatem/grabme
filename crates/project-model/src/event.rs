@@ -262,4 +262,42 @@ mod tests {
         assert!(json.contains("\"x\":0.5"));
         assert!(json.contains("\"y\":0.3"));
     }
+
+    #[test]
+    fn test_phase1_ten_minute_fixture_exists_and_is_monotonic() {
+        use std::path::PathBuf;
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("fixtures")
+            .join("sample-project")
+            .join("meta")
+            .join("events.jsonl");
+
+        let content = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+
+        assert!(lines.first().unwrap().starts_with("# "));
+
+        let mut prev_ts = None;
+        let mut last_ts = 0u64;
+        for line in lines.iter().skip(1) {
+            let event: InputEvent = serde_json::from_str(line).unwrap();
+            if let Some(prev) = prev_ts {
+                assert!(event.timestamp_ns >= prev);
+            }
+            last_ts = event.timestamp_ns;
+            prev_ts = Some(event.timestamp_ns);
+        }
+
+        let start = serde_json::from_str::<InputEvent>(lines[1])
+            .unwrap()
+            .timestamp_ns;
+        let duration_secs = (last_ts - start) as f64 / 1_000_000_000.0;
+        assert!(duration_secs >= 600.0);
+    }
 }

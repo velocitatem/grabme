@@ -8,6 +8,7 @@ description = "Offline rendering and export pipeline for GrabMe"
 [dependencies]
 grabme-common = { workspace = true }
 grabme-project-model = { workspace = true }
+grabme-processing-core = { workspace = true }
 
 anyhow = { workspace = true }
 thiserror = { workspace = true }
