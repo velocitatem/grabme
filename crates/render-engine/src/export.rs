@@ -171,6 +171,10 @@ const CURSOR_EXPR_POINTS_PER_SEC: f64 = 8.0;
 #[allow(dead_code)]
 const CURSOR_SIMPLIFY_TOLERANCE_PX: f64 = 0.1;
 const FORCE_FULL_SCREEN_RENDER: bool = true;
+const CURSOR_ICON_SIZE: u32 = 32;
+const CURSOR_HOTSPOT_X: u32 = 5;
+const CURSOR_HOTSPOT_Y: u32 = 5;
+const CURSOR_ICON_SVG: &str = include_str!("../assets/cursor-pointer-lucide.svg");
 
 impl FfmpegBackend {
     fn new() -> Self {
@@ -338,16 +342,18 @@ impl FfmpegBackend {
         let cursor_y_expr =
             build_piecewise_expr(cursor_points.iter().map(|(t, _, y)| (*t, *y)).collect());
 
+        let cursor_icon_path = ensure_cursor_icon_file()?;
+        let cursor_input_index = 1usize;
         let webcam_index = if inputs.webcam_path.is_some() {
-            Some(1usize)
+            Some(2usize)
         } else {
             None
         };
 
         let mut next_input_index = if webcam_index.is_some() {
-            2usize
+            3usize
         } else {
-            1usize
+            2usize
         };
         let mic_index = if inputs.mic_path.is_some() {
             let idx = next_input_index;
@@ -370,6 +376,7 @@ impl FfmpegBackend {
             &h_expr,
             &cursor_x_expr,
             &cursor_y_expr,
+            cursor_input_index,
             webcam_index,
         );
         let filter_len = filter.len();
@@ -393,6 +400,11 @@ impl FfmpegBackend {
             "-i".to_string(),
             inputs.screen_path.display().to_string(),
         ];
+
+        args.push("-loop".to_string());
+        args.push("1".to_string());
+        args.push("-i".to_string());
+        args.push(cursor_icon_path.display().to_string());
 
         if let Some(webcam) = &inputs.webcam_path {
             args.push("-i".to_string());
@@ -426,7 +438,7 @@ impl FfmpegBackend {
         args.push(job.output_path.display().to_string());
 
         let debug_report = format!(
-            "duration_secs={:.3}\nframes={}\nviewport_mode={}\nviewport_keyframes={}\nviewport_points={}\ncursor_projection_model={}\ncursor_projection_score={:.4}\nsource_width={}\nsource_height={}\nsmoothed_cursor_points={}\ncursor_points={}\nexpr_len_x={}\nexpr_len_y={}\nexpr_len_w={}\nexpr_len_h={}\nexpr_len_cursor_x={}\nexpr_len_cursor_y={}\nfilter_len={}\nffmpeg_args={}\nplan_build_ms={}\n",
+            "duration_secs={:.3}\nframes={}\nviewport_mode={}\nviewport_keyframes={}\nviewport_points={}\ncursor_projection_model={}\ncursor_projection_score={:.4}\ncursor_icon={}\nsource_width={}\nsource_height={}\nsmoothed_cursor_points={}\ncursor_points={}\nexpr_len_x={}\nexpr_len_y={}\nexpr_len_w={}\nexpr_len_h={}\nexpr_len_cursor_x={}\nexpr_len_cursor_y={}\nfilter_len={}\nffmpeg_args={}\nplan_build_ms={}\n",
             inputs.duration_secs,
             total_frames,
             if FORCE_FULL_SCREEN_RENDER { "full_screen" } else { "timeline" },
@@ -434,6 +446,7 @@ impl FfmpegBackend {
             viewport_points.len(),
             cursor_projection.model.as_str(),
             cursor_projection.score,
+            cursor_icon_path.display(),
             inputs.source_width,
             inputs.source_height,
             smoothed_cursor.len(),
@@ -1403,20 +1416,23 @@ fn build_filter_graph(
     h_expr: &str,
     cursor_x_expr: &str,
     cursor_y_expr: &str,
+    cursor_input_index: usize,
     webcam_index: Option<usize>,
 ) -> String {
     let mut graph = String::new();
-    let cursor_sprite = build_mouse_cursor_sprite_filter(config.fps.max(1));
 
     graph.push_str(&format!(
-        "[0:v]crop=w='iw*({w})':h='ih*({h})':x='iw*({x})':y='ih*({y})',scale={out_w}:{out_h}:flags=lanczos,format=yuv420p[base];{cursor}[cursor_sprite];[base][cursor_sprite]overlay=x='({cx})-1':y='({cy})-1':eval=frame[scene]",
+        "[0:v]crop=w='iw*({w})':h='ih*({h})':x='iw*({x})':y='ih*({y})',scale={out_w}:{out_h}:flags=lanczos,format=yuv420p[base];[{cursor_idx}:v]format=rgba,scale={cursor_size}:{cursor_size}:flags=lanczos[cursor_sprite];[base][cursor_sprite]overlay=x='({cx})-{hot_x}':y='({cy})-{hot_y}':eval=frame[scene]",
         w = w_expr,
         h = h_expr,
         x = x_expr,
         y = y_expr,
         cx = cursor_x_expr,
         cy = cursor_y_expr,
-        cursor = cursor_sprite,
+        cursor_idx = cursor_input_index,
+        cursor_size = CURSOR_ICON_SIZE,
+        hot_x = CURSOR_HOTSPOT_X,
+        hot_y = CURSOR_HOTSPOT_Y,
         out_w = config.width,
         out_h = config.height,
     ));
@@ -1442,34 +1458,25 @@ fn build_filter_graph(
     graph
 }
 
-fn build_mouse_cursor_sprite_filter(fps: u32) -> String {
-    let mut filters = vec![
-        format!("color=c=black@0.0:s=32x32:r={fps}"),
-        "format=rgba".to_string(),
-    ];
+fn ensure_cursor_icon_file() -> GrabmeResult<PathBuf> {
+    let icon_path = std::env::temp_dir().join("grabme-cursor-pointer-lucide.svg");
+    let desired = CURSOR_ICON_SVG.as_bytes();
 
-    // Outer black pointer body.
-    for y in 1..=14u32 {
-        filters.push(format!(
-            "drawbox=x=1:y={y}:w={w}:h=1:color=black@1.0:t=fill:replace=1",
-            w = y
-        ));
+    let needs_write = match std::fs::read(&icon_path) {
+        Ok(existing) => existing != desired,
+        Err(_) => true,
+    };
+
+    if needs_write {
+        std::fs::write(&icon_path, desired).map_err(|e| {
+            GrabmeError::render(format!(
+                "Failed to materialize cursor icon {}: {e}",
+                icon_path.display()
+            ))
+        })?;
     }
-    filters.push("drawbox=x=8:y=13:w=4:h=12:color=black@1.0:t=fill:replace=1".to_string());
 
-    // Inner white pointer fill.
-    for y in 2..=12u32 {
-        let w = y.saturating_sub(2);
-        if w == 0 {
-            continue;
-        }
-        filters.push(format!(
-            "drawbox=x=2:y={y}:w={w}:h=1:color=white@1.0:t=fill:replace=1"
-        ));
-    }
-    filters.push("drawbox=x=9:y=14:w=2:h=9:color=white@1.0:t=fill:replace=1".to_string());
-
-    filters.join(",")
+    Ok(icon_path)
 }
 
 fn codec_args_for_config(config: &ExportConfig) -> Vec<String> {
