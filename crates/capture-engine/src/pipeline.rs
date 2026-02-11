@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use grabme_common::error::GrabmeResult;
+use grabme_common::error::{GrabmeError, GrabmeResult};
 use gst::prelude::*;
 use gstreamer as gst;
 
@@ -219,6 +219,26 @@ pub fn build_system_audio_pipeline(
     )?))
 }
 
+pub fn build_webcam_pipeline(
+    output_path: &Path,
+    fps: u32,
+) -> GrabmeResult<Box<dyn CapturePipeline>> {
+    let device = detect_default_webcam_device().ok_or_else(|| {
+        GrabmeError::capture(
+            "No webcam device found (expected /dev/video0 or another /dev/video* node)",
+        )
+    })?;
+    let path = escape_path(output_path);
+    let webcam_fps = fps.clamp(1, 30);
+    let keyint = (webcam_fps.saturating_mul(2)).max(2);
+    let launch = format!(
+        "v4l2src device=\"{device}\" do-timestamp=true ! videoconvert ! videoscale ! videorate ! video/x-raw,framerate={webcam_fps}/1 ! x264enc tune=zerolatency speed-preset=veryfast bitrate=2500 key-int-max={keyint} ! h264parse ! matroskamux ! filesink location=\"{path}\""
+    );
+    Ok(Box::new(GstCapturePipeline::from_launch(
+        "webcam", &launch,
+    )?))
+}
+
 fn init_gstreamer() -> GrabmeResult<()> {
     static GST_INIT: OnceLock<Result<(), String>> = OnceLock::new();
     let init_res = GST_INIT.get_or_init(|| gst::init().map_err(|e| e.to_string()));
@@ -228,6 +248,29 @@ fn init_gstreamer() -> GrabmeResult<()> {
             "Failed to initialize GStreamer: {e}"
         ))),
     }
+}
+
+fn detect_default_webcam_device() -> Option<String> {
+    for idx in 0..16 {
+        let candidate = format!("/dev/video{idx}");
+        if std::path::Path::new(&candidate).exists() {
+            return Some(candidate);
+        }
+    }
+
+    let entries = std::fs::read_dir("/dev").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("video") {
+            let path = entry.path();
+            if path.exists() {
+                return Some(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    None
 }
 
 fn escape_path(path: &Path) -> String {

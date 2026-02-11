@@ -166,6 +166,10 @@ pub struct ExportConfig {
     /// Whether to burn subtitles into the video.
     #[serde(default)]
     pub burn_subtitles: bool,
+
+    /// Webcam overlay configuration for export.
+    #[serde(default)]
+    pub webcam: WebcamConfig,
 }
 
 /// Output video format.
@@ -192,6 +196,51 @@ pub enum AspectMode {
     Square,
     /// Custom aspect ratio.
     Custom,
+}
+
+/// Webcam overlay settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebcamConfig {
+    /// Whether webcam overlay is enabled during export.
+    pub enabled: bool,
+
+    /// Webcam bounding-box size relative to output dimensions.
+    /// Typical range: 0.10 - 0.40.
+    pub size_ratio: f64,
+
+    /// Corner placement for the overlay.
+    #[serde(default)]
+    pub corner: WebcamCorner,
+
+    /// Margin from edges as ratio of output dimensions.
+    pub margin_ratio: f64,
+
+    /// Overlay opacity [0.0, 1.0].
+    pub opacity: f64,
+}
+
+impl Default for WebcamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            size_ratio: 0.24,
+            corner: WebcamCorner::BottomRight,
+            margin_ratio: 0.03,
+            opacity: 0.92,
+        }
+    }
+}
+
+/// Corner placement for webcam overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WebcamCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
 }
 
 /// The complete in-memory representation of a loaded project.
@@ -251,6 +300,7 @@ impl Project {
                 audio_bitrate_kbps: 192,
                 aspect_mode: AspectMode::Landscape,
                 burn_subtitles: false,
+                webcam: WebcamConfig::default(),
             },
         }
     }

@@ -107,7 +107,14 @@ JSONL format, one event per line. First line is a comment-header.
     "video_bitrate_kbps": 8000,
     "audio_bitrate_kbps": 192,
     "aspect_mode": "landscape",
-    "burn_subtitles": false
+    "burn_subtitles": false,
+    "webcam": {
+      "enabled": true,
+      "size_ratio": 0.24,
+      "corner": "bottom_right",
+      "margin_ratio": 0.03,
+      "opacity": 0.92
+    }
   }
 }
 ```

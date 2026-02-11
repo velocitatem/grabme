@@ -18,6 +18,7 @@ pub fn check_capabilities() -> Vec<Capability> {
     vec![
         check_portal_access(),
         check_pipewire_access(),
+        check_webcam_access(),
         check_input_device_access(),
         check_audio_access(),
     ]
@@ -94,6 +95,29 @@ fn check_audio_access() -> Capability {
         available: true, // Usually available on desktop Linux
         required: false,
         fix_instructions: None,
+    }
+}
+
+/// Check if a webcam device is available.
+fn check_webcam_access() -> Capability {
+    let has_webcam = (0..16)
+        .map(|idx| format!("/dev/video{idx}"))
+        .any(|path| std::path::Path::new(&path).exists());
+
+    Capability {
+        name: "Webcam Device".to_string(),
+        description: "Video4Linux webcam source for optional picture-in-picture capture"
+            .to_string(),
+        available: has_webcam,
+        required: false,
+        fix_instructions: if has_webcam {
+            None
+        } else {
+            Some(
+                "Connect a webcam and verify /dev/video* exists (v4l2-ctl --list-devices)"
+                    .to_string(),
+            )
+        },
     }
 }
 

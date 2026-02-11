@@ -35,6 +35,11 @@ For each output frame:
 8. **Subtitle Burn**: Draw subtitle text if configured
 9. **Encode**: Feed frame to video encoder
 
+Webcam composition details:
+- Uses per-track clock offsets to keep webcam aligned with screen timeline
+- Preserves webcam aspect ratio via scale+pad into a configurable PiP box
+- Supports corner placement and opacity via `export.webcam` settings
+
 ## Codec Presets
 
 ### MP4 H.264 (Default)

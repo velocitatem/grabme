@@ -232,6 +232,7 @@ impl OverlayRecorderApp {
                     audio_bitrate_kbps: loaded.project.export.audio_bitrate_kbps,
                     aspect_mode: AspectMode::Landscape,
                     burn_subtitles: loaded.project.export.burn_subtitles,
+                    webcam: loaded.project.export.webcam.clone(),
                 };
 
                 let tx_progress = tx.clone();

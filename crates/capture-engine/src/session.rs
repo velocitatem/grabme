@@ -18,8 +18,8 @@ use grabme_platform_linux::{
 use grabme_project_model::{LoadedProject, TrackRef};
 
 use crate::pipeline::{
-    build_mic_pipeline, build_screen_pipeline, build_system_audio_pipeline, build_x11_mic_pipeline,
-    build_x11_screen_pipeline, CapturePipeline,
+    build_mic_pipeline, build_screen_pipeline, build_system_audio_pipeline, build_webcam_pipeline,
+    build_x11_mic_pipeline, build_x11_screen_pipeline, CapturePipeline,
 };
 
 /// Configuration for starting a new recording session.
@@ -112,6 +112,7 @@ pub struct CaptureSession {
     project: Option<LoadedProject>,
     stop_flag: Arc<AtomicBool>,
     screen_pipeline: Option<Box<dyn CapturePipeline>>,
+    webcam_pipeline: Option<Box<dyn CapturePipeline>>,
     mic_pipeline: Option<Box<dyn CapturePipeline>>,
     system_pipeline: Option<Box<dyn CapturePipeline>>,
     portal_session_handle: Option<String>,
@@ -123,6 +124,7 @@ pub struct CaptureSession {
 #[derive(Debug, Default, Clone, Copy)]
 struct StreamOffsets {
     screen_ns: i64,
+    webcam_ns: i64,
     mic_ns: i64,
     system_ns: i64,
     events_ns: i64,
@@ -138,6 +140,7 @@ impl CaptureSession {
             project: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
             screen_pipeline: None,
+            webcam_pipeline: None,
             mic_pipeline: None,
             system_pipeline: None,
             portal_session_handle: None,
@@ -276,6 +279,16 @@ impl CaptureSession {
         self.stream_offsets_ns.screen_ns = clock.elapsed_ns() as i64;
         self.screen_pipeline = Some(screen_pipeline);
 
+        if self.config.webcam {
+            let webcam_path = sources_dir.join("webcam.mkv");
+            let mut webcam_pipeline = build_webcam_pipeline(&webcam_path, self.config.fps)?;
+            tracing::info!("Starting webcam pipeline");
+            webcam_pipeline.start()?;
+            tracing::info!("Webcam pipeline started");
+            self.stream_offsets_ns.webcam_ns = clock.elapsed_ns() as i64;
+            self.webcam_pipeline = Some(webcam_pipeline);
+        }
+
         if self.config.audio.mic {
             let mic_path = sources_dir.join("mic.wav");
             let mut mic_pipeline = if display_server == DisplayServer::X11 {
@@ -351,6 +364,9 @@ impl CaptureSession {
         if let Some(mut pipeline) = self.screen_pipeline.take() {
             pipeline.stop()?;
         }
+        if let Some(mut pipeline) = self.webcam_pipeline.take() {
+            pipeline.stop()?;
+        }
         if let Some(mut pipeline) = self.mic_pipeline.take() {
             pipeline.stop()?;
         }
@@ -388,6 +404,15 @@ impl CaptureSession {
                 codec: "h264".to_string(),
                 offset_ns: self.stream_offsets_ns.screen_ns,
             });
+
+            if self.config.webcam && self.stream_offsets_ns.webcam_ns != 0 {
+                project.project.tracks.webcam = Some(TrackRef {
+                    path: "sources/webcam.mkv".to_string(),
+                    duration_secs: elapsed,
+                    codec: "h264".to_string(),
+                    offset_ns: self.stream_offsets_ns.webcam_ns,
+                });
+            }
 
             if self.config.audio.mic {
                 project.project.tracks.mic = Some(TrackRef {
@@ -431,6 +456,9 @@ impl CaptureSession {
         if let Some(ref mut pipeline) = self.screen_pipeline {
             pipeline.pause()?;
         }
+        if let Some(ref mut pipeline) = self.webcam_pipeline {
+            pipeline.pause()?;
+        }
         if let Some(ref mut pipeline) = self.mic_pipeline {
             pipeline.pause()?;
         }
@@ -448,6 +476,9 @@ impl CaptureSession {
             return Err(GrabmeError::capture("Not paused"));
         }
         if let Some(ref mut pipeline) = self.screen_pipeline {
+            pipeline.resume()?;
+        }
+        if let Some(ref mut pipeline) = self.webcam_pipeline {
             pipeline.resume()?;
         }
         if let Some(ref mut pipeline) = self.mic_pipeline {
@@ -514,6 +545,7 @@ impl CaptureSession {
 
         for (label, offset) in [
             ("events", self.stream_offsets_ns.events_ns),
+            ("webcam", self.stream_offsets_ns.webcam_ns),
             ("mic", self.stream_offsets_ns.mic_ns),
             ("system", self.stream_offsets_ns.system_ns),
         ] {

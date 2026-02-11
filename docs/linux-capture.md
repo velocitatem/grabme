@@ -28,6 +28,17 @@ GrabMe auto-detects the display server:
 | Sway 1.8+ | Yes | Yes | No |
 | wlroots | Yes | Yes | No |
 
+## Webcam Capture
+
+When `--webcam` is enabled, GrabMe records webcam video as a separate source track:
+
+- Source: Video4Linux device (`/dev/video*`, first available device)
+- Pipeline: `v4l2src -> videoconvert/videoscale/videorate -> x264enc -> matroskamux`
+- Output: `sources/webcam.mkv`
+- Project metadata: `tracks.webcam` in `meta/project.json`
+
+The webcam track is composited during export (picture-in-picture) and stays optional.
+
 ## Input Tracking
 
 ### Backend Priority

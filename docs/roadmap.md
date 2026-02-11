@@ -41,7 +41,7 @@
 - [x] GStreamer/FFmpeg render pipeline
 - [x] Crop/scale from zoom keyframes
 - [x] Cursor sprite overlay at smoothed coordinates
-- [ ] Webcam compositing (TODO: add webcam rendering properly)
+- [x] Webcam compositing
 - [x] H.264 MP4 output
 - [x] H.265 MP4 output
 - [x] Export progress reporting

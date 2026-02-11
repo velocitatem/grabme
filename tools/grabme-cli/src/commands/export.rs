@@ -41,6 +41,7 @@ pub async fn run(
         audio_bitrate_kbps: 192,
         aspect_mode: AspectMode::Landscape,
         burn_subtitles: false,
+        webcam: project.project.export.webcam.clone(),
     };
 
     println!("  Output: {}", output_path.display());

@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use grabme_common::error::{GrabmeError, GrabmeResult};
 use grabme_processing_core::cursor_smooth::CursorSmoother;
 use grabme_project_model::event::{parse_events, InputEvent};
-use grabme_project_model::project::{ExportConfig, ExportFormat, LoadedProject};
+use grabme_project_model::project::{ExportConfig, ExportFormat, LoadedProject, WebcamCorner};
 use grabme_project_model::viewport::Viewport;
 
 use crate::compositor::compute_compositions;
@@ -121,20 +121,15 @@ pub async fn export_project(
     Ok(job.output_path)
 }
 
-// TODO: Initialize GStreamer/FFmpeg render pipeline
-// TODO: Apply zoom keyframes to crop/scale
-// TODO: Overlay synthetic cursor
-// TODO: Composite webcam
-// TODO: Burn subtitles if configured
-// TODO: Encode to target format
-
 #[derive(Debug, Clone)]
 struct LoadedExportInputs {
     project: LoadedProject,
     screen_path: PathBuf,
+    screen_offset_ns: i64,
     source_width: u32,
     source_height: u32,
     webcam_path: Option<PathBuf>,
+    webcam_offset_ns: Option<i64>,
     mic_path: Option<PathBuf>,
     system_audio_path: Option<PathBuf>,
     events: Vec<InputEvent>,
@@ -196,19 +191,29 @@ impl FfmpegBackend {
         if !screen_path.exists() {
             return Err(GrabmeError::FileNotFound { path: screen_path });
         }
+        let screen_offset_ns = screen_track.offset_ns;
 
         let (source_width, source_height) = probe_video_dimensions(&screen_path).unwrap_or((
             project.project.recording.capture_width,
             project.project.recording.capture_height,
         ));
 
-        let webcam_path = project
-            .project
-            .tracks
-            .webcam
-            .as_ref()
-            .map(|track| job.project_dir.join(&track.path))
-            .filter(|path| path.exists());
+        let webcam_track = project.project.tracks.webcam.as_ref();
+        let webcam_offset_ns = webcam_track.map(|track| track.offset_ns);
+        let webcam_path = webcam_track.and_then(|track| {
+            let path = job.project_dir.join(&track.path);
+            if path.exists() {
+                Some(path)
+            } else {
+                tracing::warn!(path = %path.display(), "Webcam track is referenced but file is missing; skipping webcam overlay");
+                None
+            }
+        });
+        let webcam_offset_ns = if webcam_path.is_some() {
+            webcam_offset_ns
+        } else {
+            None
+        };
 
         let mic_path = project
             .project
@@ -248,9 +253,11 @@ impl FfmpegBackend {
         Ok(LoadedExportInputs {
             project,
             screen_path,
+            screen_offset_ns,
             source_width,
             source_height,
             webcam_path,
+            webcam_offset_ns,
             mic_path,
             system_audio_path,
             events,
@@ -388,6 +395,10 @@ impl FfmpegBackend {
         } else {
             "0:a?".to_string()
         };
+        let webcam_offset_delta_ns = inputs
+            .webcam_offset_ns
+            .map(|offset| offset - inputs.screen_offset_ns)
+            .unwrap_or(0);
 
         let mut args = vec![
             "-y".to_string(),
@@ -407,8 +418,7 @@ impl FfmpegBackend {
         args.push(cursor_icon_path.display().to_string());
 
         if let Some(webcam) = &inputs.webcam_path {
-            args.push("-i".to_string());
-            args.push(webcam.display().to_string());
+            append_input_with_offset(&mut args, webcam, webcam_offset_delta_ns);
         }
 
         if let Some(mic) = &inputs.mic_path {
@@ -438,7 +448,7 @@ impl FfmpegBackend {
         args.push(job.output_path.display().to_string());
 
         let debug_report = format!(
-            "duration_secs={:.3}\nframes={}\nviewport_mode={}\nviewport_keyframes={}\nviewport_points={}\ncursor_projection_model={}\ncursor_projection_score={:.4}\ncursor_icon={}\nsource_width={}\nsource_height={}\nsmoothed_cursor_points={}\ncursor_points={}\nexpr_len_x={}\nexpr_len_y={}\nexpr_len_w={}\nexpr_len_h={}\nexpr_len_cursor_x={}\nexpr_len_cursor_y={}\nfilter_len={}\nffmpeg_args={}\nplan_build_ms={}\n",
+            "duration_secs={:.3}\nframes={}\nviewport_mode={}\nviewport_keyframes={}\nviewport_points={}\ncursor_projection_model={}\ncursor_projection_score={:.4}\ncursor_icon={}\nwebcam_enabled={}\nwebcam_size_ratio={:.3}\nwebcam_corner={}\nwebcam_margin_ratio={:.3}\nwebcam_opacity={:.3}\nwebcam_offset_delta_ns={}\nsource_width={}\nsource_height={}\nsmoothed_cursor_points={}\ncursor_points={}\nexpr_len_x={}\nexpr_len_y={}\nexpr_len_w={}\nexpr_len_h={}\nexpr_len_cursor_x={}\nexpr_len_cursor_y={}\nfilter_len={}\nffmpeg_args={}\nplan_build_ms={}\n",
             inputs.duration_secs,
             total_frames,
             if FORCE_FULL_SCREEN_RENDER { "full_screen" } else { "timeline" },
@@ -447,6 +457,12 @@ impl FfmpegBackend {
             cursor_projection.model.as_str(),
             cursor_projection.score,
             cursor_icon_path.display(),
+            job.config.webcam.enabled,
+            job.config.webcam.size_ratio,
+            webcam_corner_label(job.config.webcam.corner),
+            job.config.webcam.margin_ratio,
+            job.config.webcam.opacity,
+            webcam_offset_delta_ns,
             inputs.source_width,
             inputs.source_height,
             smoothed_cursor.len(),
@@ -617,6 +633,12 @@ impl FfmpegBackend {
             &inputs.project.timeline
         };
 
+        let webcam_overlay = if inputs.webcam_path.is_some() {
+            Some(job.config.webcam.clone())
+        } else {
+            None
+        };
+
         let compositions = compute_compositions(
             timeline,
             &plan.smoothed_cursor,
@@ -624,6 +646,7 @@ impl FfmpegBackend {
             job.config.height,
             job.config.fps,
             inputs.duration_secs,
+            webcam_overlay,
         );
 
         let mut summary = VerificationSummary {
@@ -1437,25 +1460,64 @@ fn build_filter_graph(
         out_h = config.height,
     ));
 
-    if let Some(webcam_idx) = webcam_index {
-        let webcam_w = (config.width as f64 * 0.24).round() as u32;
-        let webcam_h = (config.height as f64 * 0.24).round() as u32;
-        let margin_x = (config.width as f64 * 0.03).round() as u32;
-        let margin_y = (config.height as f64 * 0.03).round() as u32;
+    if let Some(webcam_idx) = webcam_index.filter(|_| config.webcam.enabled) {
+        let webcam_size_ratio = config.webcam.size_ratio.clamp(0.08, 0.50);
+        let webcam_margin_ratio = config.webcam.margin_ratio.clamp(0.0, 0.20);
+        let webcam_opacity = config.webcam.opacity.clamp(0.0, 1.0);
+
+        let webcam_w = even_dimension(config.width as f64 * webcam_size_ratio);
+        let webcam_h = even_dimension(config.height as f64 * webcam_size_ratio);
+        let margin_x = (config.width as f64 * webcam_margin_ratio).round() as u32;
+        let margin_y = (config.height as f64 * webcam_margin_ratio).round() as u32;
+        let (overlay_x, overlay_y) = match config.webcam.corner {
+            WebcamCorner::TopLeft => (format!("{margin_x}"), format!("{margin_y}")),
+            WebcamCorner::TopRight => (format!("W-w-{margin_x}"), format!("{margin_y}")),
+            WebcamCorner::BottomLeft => (format!("{margin_x}"), format!("H-h-{margin_y}")),
+            WebcamCorner::BottomRight => (format!("W-w-{margin_x}"), format!("H-h-{margin_y}")),
+        };
 
         graph.push_str(&format!(
-            ";[{webcam}:v]scale={webcam_w}:{webcam_h}:flags=lanczos,format=yuva420p,colorchannelmixer=aa=0.92[webcam];[scene][webcam]overlay=x=W-w-{mx}:y=H-h-{my}[vout]",
+            ";[{webcam}:v]scale=w={webcam_w}:h={webcam_h}:force_original_aspect_ratio=decrease:flags=lanczos,pad={webcam_w}:{webcam_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,format=yuva420p,colorchannelmixer=aa={opacity:.3}[webcam];[scene][webcam]overlay=x={overlay_x}:y={overlay_y}:eof_action=pass[vout]",
             webcam = webcam_idx,
-            webcam_w = webcam_w.max(2),
-            webcam_h = webcam_h.max(2),
-            mx = margin_x,
-            my = margin_y,
+            webcam_w = webcam_w,
+            webcam_h = webcam_h,
+            opacity = webcam_opacity,
+            overlay_x = overlay_x,
+            overlay_y = overlay_y,
         ));
     } else {
         graph.push_str(";[scene]null[vout]");
     }
 
     graph
+}
+
+fn webcam_corner_label(corner: WebcamCorner) -> &'static str {
+    match corner {
+        WebcamCorner::TopLeft => "top_left",
+        WebcamCorner::TopRight => "top_right",
+        WebcamCorner::BottomLeft => "bottom_left",
+        WebcamCorner::BottomRight => "bottom_right",
+    }
+}
+
+fn append_input_with_offset(args: &mut Vec<String>, path: &std::path::Path, offset_ns: i64) {
+    if offset_ns != 0 {
+        args.push("-itsoffset".to_string());
+        args.push(format!("{:.6}", offset_ns as f64 / 1_000_000_000.0));
+    }
+
+    args.push("-i".to_string());
+    args.push(path.display().to_string());
+}
+
+fn even_dimension(raw: f64) -> u32 {
+    let mut value = raw.round() as u32;
+    value = value.max(2);
+    if value % 2 != 0 {
+        value = value.saturating_sub(1).max(2);
+    }
+    value
 }
 
 fn ensure_cursor_icon_file() -> GrabmeResult<PathBuf> {
@@ -1832,6 +1894,43 @@ mod tests {
         assert!(!points.is_empty());
         assert!(points[0].1.abs() < 1e-6);
         assert!(points[0].2.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_build_filter_graph_webcam_uses_aspect_safe_scaling() {
+        let config = grabme_project_model::project::Project::new("test", 1920, 1080, 60).export;
+
+        let graph = build_filter_graph(&config, "0", "0", "1", "1", "100", "200", 1, Some(2));
+
+        assert!(graph.contains("force_original_aspect_ratio=decrease"));
+        assert!(graph.contains("pad="));
+        assert!(graph.contains("eof_action=pass"));
+    }
+
+    #[test]
+    fn test_build_filter_graph_skips_webcam_when_disabled() {
+        let mut config = grabme_project_model::project::Project::new("test", 1920, 1080, 60).export;
+        config.webcam.enabled = false;
+
+        let graph = build_filter_graph(&config, "0", "0", "1", "1", "100", "200", 1, Some(2));
+
+        assert!(graph.contains(";[scene]null[vout]"));
+        assert!(!graph.contains("[2:v]scale"));
+    }
+
+    #[test]
+    fn test_append_input_with_offset_includes_itsoffset() {
+        let mut args = Vec::new();
+        append_input_with_offset(
+            &mut args,
+            std::path::Path::new("/tmp/webcam.mkv"),
+            250_000_000,
+        );
+
+        assert_eq!(args[0], "-itsoffset");
+        assert_eq!(args[1], "0.250000");
+        assert_eq!(args[2], "-i");
+        assert_eq!(args[3], "/tmp/webcam.mkv");
     }
 
     fn mock_project_with_geometry(
