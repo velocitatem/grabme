@@ -17,4 +17,6 @@ grabme-project-model = { workspace = true }
 grabme-render-engine = { workspace = true }
 tokio = { workspace = true }
 
+grabme-platform-linux = { workspace = true }
+
 eframe = { version = "0.27", default-features = true }

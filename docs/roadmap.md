@@ -65,3 +65,7 @@
 - [ ] Fractional scaling / HiDPI testing
 - [ ] Flatpak/Snap packaging
 - [ ] User documentation
+
+
+TODO:
+- [ ] Zooming: for now we have had the fullscreen fixed and we need to develop the faeture of very smooth zooming when we have the user click something.
