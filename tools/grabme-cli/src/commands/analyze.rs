@@ -1,21 +1,53 @@
 //! Run Auto-Director analysis on a project.
 
+use std::cmp::Ordering;
 use std::path::PathBuf;
 
 use grabme_processing_core::auto_zoom::{AutoZoomAnalyzer, AutoZoomConfig};
 use grabme_processing_core::cursor_smooth::CursorSmoother;
 use grabme_project_model::event::{
-    parse_events, EventKind, EventStreamHeader, InputEvent, PointerCoordinateSpace,
+    parse_events, ButtonState, EventKind, EventStreamHeader, InputEvent, MouseButton,
+    PointerCoordinateSpace,
 };
 use grabme_project_model::project::RecordingConfig;
-use grabme_project_model::timeline::SmoothingAlgorithm as TimelineSmoothingAlgorithm;
+use grabme_project_model::timeline::{
+    CameraKeyframe, EasingFunction, KeyframeSource,
+    SmoothingAlgorithm as TimelineSmoothingAlgorithm, Timeline,
+};
+use grabme_project_model::viewport::Viewport;
 use grabme_project_model::LoadedProject;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraStyle {
+    Production,
+    Auto,
+}
+
+impl CameraStyle {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "production" | "prod" | "click" | "clicks" => Ok(Self::Production),
+            "auto" | "legacy" | "dynamic" => Ok(Self::Auto),
+            other => Err(anyhow::anyhow!(
+                "Invalid --camera-style value: {other}. Use one of: production, auto"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Auto => "auto",
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     path: PathBuf,
     chunk_secs: f64,
     vertical: bool,
+    camera_style: String,
     hover_zoom: f64,
     scan_zoom: f64,
     dwell_radius: f64,
@@ -87,7 +119,10 @@ pub fn run(
     let smoothed = smoother.smooth(&analysis_events);
     println!("  Smoothed {} pointer positions", smoothed.len());
 
-    // Run auto-zoom analysis
+    let camera_style = CameraStyle::parse(&camera_style)?;
+    println!("  Camera style: {}", camera_style.as_str());
+
+    // Build camera keyframes
     if vertical {
         println!("  Running vertical (9:16) analysis...");
         let config = grabme_processing_core::vertical::VerticalConfig::default();
@@ -99,23 +134,36 @@ pub fn run(
             project.timeline.keyframes.len()
         );
     } else {
-        let effective_chunk_secs = adaptive_chunk_secs(chunk_secs, &analysis_events);
-        println!("  Running auto-zoom analysis (chunk={effective_chunk_secs}s)...");
-        let config = AutoZoomConfig {
-            chunk_duration_secs: effective_chunk_secs,
-            hover_zoom,
-            scan_zoom,
-            dwell_radius,
-            dwell_velocity_threshold: dwell_velocity,
-            smoothing_window: smooth_window,
-            monitor_count,
-            focused_monitor_index: focused_monitor,
-            ..Default::default()
-        };
-        let analyzer = AutoZoomAnalyzer::new(config);
-        let timeline = analyzer.analyze(&analysis_events);
-        project.timeline.keyframes = timeline.keyframes;
-        println!("  Generated {} keyframes", project.timeline.keyframes.len());
+        match camera_style {
+            CameraStyle::Production => {
+                println!("  Running production camera analysis (full-frame + click emphasis)...");
+                let timeline = build_production_timeline(&analysis_events);
+                project.timeline.keyframes = timeline.keyframes;
+                println!(
+                    "  Generated {} production keyframes",
+                    project.timeline.keyframes.len()
+                );
+            }
+            CameraStyle::Auto => {
+                let effective_chunk_secs = adaptive_chunk_secs(chunk_secs, &analysis_events);
+                println!("  Running auto-zoom analysis (chunk={effective_chunk_secs}s)...");
+                let config = AutoZoomConfig {
+                    chunk_duration_secs: effective_chunk_secs,
+                    hover_zoom,
+                    scan_zoom,
+                    dwell_radius,
+                    dwell_velocity_threshold: dwell_velocity,
+                    smoothing_window: smooth_window,
+                    monitor_count,
+                    focused_monitor_index: focused_monitor,
+                    ..Default::default()
+                };
+                let analyzer = AutoZoomAnalyzer::new(config);
+                let timeline = analyzer.analyze(&analysis_events);
+                project.timeline.keyframes = timeline.keyframes;
+                println!("  Generated {} keyframes", project.timeline.keyframes.len());
+            }
+        }
     }
 
     // Save updated timeline
@@ -131,6 +179,128 @@ pub fn run(
     println!("\nAnalysis complete.");
 
     Ok(())
+}
+
+const PRODUCTION_CLICK_ZOOM_SIZE: f64 = 0.94;
+const PRODUCTION_CLICK_LEAD_SECS: f64 = 0.06;
+const PRODUCTION_CLICK_HOLD_SECS: f64 = 0.10;
+const PRODUCTION_CLICK_RELEASE_SECS: f64 = 0.28;
+const PRODUCTION_CLICK_COOLDOWN_SECS: f64 = 0.16;
+
+fn build_production_timeline(events: &[InputEvent]) -> Timeline {
+    let mut keyframes = vec![full_keyframe(0.0, EasingFunction::EaseInOut)];
+    if events.is_empty() {
+        let mut timeline = Timeline::new();
+        timeline.keyframes = keyframes;
+        return timeline;
+    }
+
+    let start_ns = events.first().map(|e| e.timestamp_ns).unwrap_or(0);
+    let mut last_click_t = f64::NEG_INFINITY;
+
+    for event in events {
+        let EventKind::Click {
+            button,
+            state,
+            x,
+            y,
+        } = &event.kind
+        else {
+            continue;
+        };
+        if *button != MouseButton::Left || *state != ButtonState::Down {
+            continue;
+        }
+
+        let click_t = event.timestamp_ns.saturating_sub(start_ns) as f64 / 1_000_000_000.0;
+        if click_t - last_click_t < PRODUCTION_CLICK_COOLDOWN_SECS {
+            continue;
+        }
+        last_click_t = click_t;
+
+        let pre_t = (click_t - PRODUCTION_CLICK_LEAD_SECS).max(0.0);
+        let hold_t = click_t + PRODUCTION_CLICK_HOLD_SECS;
+        let settle_t = hold_t + PRODUCTION_CLICK_RELEASE_SECS;
+        let focus_viewport = centered_square_viewport(*x, *y, PRODUCTION_CLICK_ZOOM_SIZE);
+
+        keyframes.push(full_keyframe(pre_t, EasingFunction::EaseInOut));
+        keyframes.push(CameraKeyframe {
+            time_secs: click_t,
+            viewport: focus_viewport,
+            easing: EasingFunction::EaseOut,
+            source: KeyframeSource::Auto,
+        });
+        keyframes.push(CameraKeyframe {
+            time_secs: hold_t,
+            viewport: focus_viewport,
+            easing: EasingFunction::EaseInOut,
+            source: KeyframeSource::Auto,
+        });
+        keyframes.push(full_keyframe(settle_t, EasingFunction::EaseInOut));
+    }
+
+    let mut timeline = Timeline::new();
+    timeline.keyframes = normalize_keyframes(keyframes);
+    timeline
+}
+
+fn centered_square_viewport(cx: f64, cy: f64, size: f64) -> Viewport {
+    let side = size.clamp(0.01, 1.0);
+    let cx = cx.clamp(0.0, 1.0);
+    let cy = cy.clamp(0.0, 1.0);
+    let max_offset = (1.0 - side).max(0.0);
+    let x = (cx - side / 2.0).clamp(0.0, max_offset);
+    let y = (cy - side / 2.0).clamp(0.0, max_offset);
+    Viewport::new(x, y, side, side)
+}
+
+fn full_keyframe(time_secs: f64, easing: EasingFunction) -> CameraKeyframe {
+    CameraKeyframe {
+        time_secs,
+        viewport: Viewport::FULL,
+        easing,
+        source: KeyframeSource::Auto,
+    }
+}
+
+fn normalize_keyframes(keyframes: Vec<CameraKeyframe>) -> Vec<CameraKeyframe> {
+    let mut sorted: Vec<CameraKeyframe> = keyframes
+        .into_iter()
+        .filter(|kf| kf.time_secs.is_finite())
+        .map(|mut kf| {
+            kf.time_secs = kf.time_secs.max(0.0);
+            kf
+        })
+        .collect();
+
+    sorted.sort_by(|a, b| {
+        a.time_secs
+            .partial_cmp(&b.time_secs)
+            .unwrap_or(Ordering::Equal)
+    });
+
+    let mut normalized: Vec<CameraKeyframe> = Vec::with_capacity(sorted.len().max(1));
+    for keyframe in sorted {
+        if let Some(last) = normalized.last_mut() {
+            if (last.time_secs - keyframe.time_secs).abs() < 1e-6 {
+                *last = keyframe;
+                continue;
+            }
+
+            if last.viewport == keyframe.viewport && (keyframe.time_secs - last.time_secs) < 0.005 {
+                continue;
+            }
+        }
+        normalized.push(keyframe);
+    }
+
+    if normalized.is_empty() {
+        normalized.push(full_keyframe(0.0, EasingFunction::EaseInOut));
+    } else if normalized[0].time_secs > 0.0 {
+        normalized.insert(0, full_keyframe(0.0, EasingFunction::EaseInOut));
+    }
+
+    normalized
 }
 
 fn adaptive_chunk_secs(requested_secs: f64, events: &[InputEvent]) -> f64 {
@@ -247,7 +417,9 @@ fn project_events_to_capture_space(
         if let Some(explicit) = projection_candidate_for_space(space, recording) {
             let explicit_score = score_projection_candidate(explicit, events);
             let best_fit_score = score_projection_candidate(best_fit, events);
-            if best_fit_score > explicit_score + EXPLICIT_PROJECTION_FALLBACK_DELTA {
+            if best_fit.model == AnalysisPointerModel::CaptureNormalized
+                && best_fit_score > explicit_score + EXPLICIT_PROJECTION_FALLBACK_DELTA
+            {
                 best_fit
             } else {
                 explicit
@@ -470,7 +642,61 @@ fn parse_cursor_smoothing(raw: &str) -> anyhow::Result<TimelineSmoothingAlgorith
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grabme_project_model::event::MouseButton;
     use grabme_project_model::project::Project;
+
+    #[test]
+    fn test_camera_style_parser_accepts_aliases() {
+        assert_eq!(
+            CameraStyle::parse("production").unwrap(),
+            CameraStyle::Production
+        );
+        assert_eq!(
+            CameraStyle::parse("click").unwrap(),
+            CameraStyle::Production
+        );
+        assert_eq!(CameraStyle::parse("auto").unwrap(), CameraStyle::Auto);
+        assert_eq!(CameraStyle::parse("legacy").unwrap(), CameraStyle::Auto);
+        assert!(CameraStyle::parse("wat").is_err());
+    }
+
+    #[test]
+    fn test_build_production_timeline_without_clicks_stays_full_frame() {
+        let events = vec![
+            InputEvent::pointer(0, 0.2, 0.2),
+            InputEvent::pointer(500_000_000, 0.4, 0.4),
+            InputEvent::pointer(1_000_000_000, 0.6, 0.6),
+        ];
+
+        let timeline = build_production_timeline(&events);
+        assert_eq!(timeline.keyframes.len(), 1);
+        assert_eq!(timeline.keyframes[0].viewport, Viewport::FULL);
+    }
+
+    #[test]
+    fn test_build_production_timeline_adds_click_zoom_pulse() {
+        let events = vec![
+            InputEvent::pointer(0, 0.5, 0.5),
+            InputEvent::click(
+                1_000_000_000,
+                MouseButton::Left,
+                ButtonState::Down,
+                0.85,
+                0.2,
+            ),
+            InputEvent::click(1_040_000_000, MouseButton::Left, ButtonState::Up, 0.85, 0.2),
+        ];
+
+        let timeline = build_production_timeline(&events);
+        assert!(timeline.keyframes.len() >= 4);
+        assert_eq!(timeline.keyframes[0].time_secs, 0.0);
+        assert_eq!(timeline.keyframes[0].viewport, Viewport::FULL);
+        assert!(timeline.keyframes.iter().any(|kf| kf.viewport.w < 1.0));
+        assert!(timeline
+            .keyframes
+            .iter()
+            .any(|kf| kf.time_secs > 1.0 && kf.viewport == Viewport::FULL));
+    }
 
     #[test]
     fn test_adaptive_chunk_secs_short_recording_uses_finer_chunks() {

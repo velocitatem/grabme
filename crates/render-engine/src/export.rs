@@ -923,7 +923,9 @@ fn select_cursor_projection(
     if let Some(space) = explicit_space {
         if let Some(candidate) = projection_candidate_for_space(space, recording) {
             let explicit_score = score_projection_candidate(candidate, smoothed_cursor);
-            if auto_projection.score > explicit_score + EXPLICIT_PROJECTION_FALLBACK_DELTA {
+            if auto_projection.model == CursorCoordinateModel::CaptureNormalized
+                && auto_projection.score > explicit_score + EXPLICIT_PROJECTION_FALLBACK_DELTA
+            {
                 tracing::warn!(
                     explicit_model = candidate.model.as_str(),
                     explicit_score,

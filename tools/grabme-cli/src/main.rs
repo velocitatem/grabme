@@ -82,23 +82,27 @@ enum Commands {
         #[arg(long)]
         vertical: bool,
 
-        /// Hover zoom viewport size (lower = tighter zoom)
+        /// Camera style: production (full-frame + click emphasis) or auto (legacy auto-zoom)
+        #[arg(long, default_value = "production")]
+        camera_style: String,
+
+        /// Hover zoom viewport size (lower = tighter zoom). Used with --camera-style auto.
         #[arg(long, default_value = "0.55")]
         hover_zoom: f64,
 
-        /// Scan zoom viewport size (higher = wider framing)
+        /// Scan zoom viewport size (higher = wider framing). Used with --camera-style auto.
         #[arg(long, default_value = "0.92")]
         scan_zoom: f64,
 
-        /// Dwell radius threshold (normalized)
+        /// Dwell radius threshold (normalized). Used with --camera-style auto.
         #[arg(long, default_value = "0.15")]
         dwell_radius: f64,
 
-        /// Dwell velocity threshold (normalized units/sec)
+        /// Dwell velocity threshold (normalized units/sec). Used with --camera-style auto.
         #[arg(long, default_value = "0.18")]
         dwell_velocity: f64,
 
-        /// Smoothing window for generated camera keyframes
+        /// Smoothing window for generated camera keyframes. Used with --camera-style auto.
         #[arg(long, default_value = "3")]
         smooth_window: usize,
 
@@ -207,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
             path,
             chunk_secs,
             vertical,
+            camera_style,
             hover_zoom,
             scan_zoom,
             dwell_radius,
@@ -220,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
             path,
             chunk_secs,
             vertical,
+            camera_style,
             hover_zoom,
             scan_zoom,
             dwell_radius,
