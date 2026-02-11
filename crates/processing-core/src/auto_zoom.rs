@@ -57,10 +57,10 @@ impl Default for AutoZoomConfig {
             chunk_duration_secs: 2.0,
             dwell_threshold_secs: 1.0,
             dwell_radius: 0.15,
-            hover_zoom: 0.4,
-            scan_zoom: 0.85,
+            hover_zoom: 0.55,
+            scan_zoom: 0.92,
             smoothing_window: 3,
-            min_viewport_size: 0.25,
+            min_viewport_size: 0.40,
             dwell_velocity_threshold: 0.18,
             monitor_count: 1,
             focused_monitor_index: 0,
@@ -224,9 +224,16 @@ impl AutoZoomAnalyzer {
 
             let viewport_size = match activity {
                 ActivityType::Dwell => self.config.hover_zoom.max(self.config.min_viewport_size),
-                ActivityType::Scan => self.config.scan_zoom,
+                ActivityType::Scan => self.config.scan_zoom.max(self.config.min_viewport_size),
                 ActivityType::Idle => continue, // skip idle chunks
             };
+
+            // Guardrail: ensure viewport is large enough to keep observed cursor
+            // motion for this chunk in frame (with a small safety margin).
+            let spread_guard = (chunk.spread * 2.4).clamp(self.config.min_viewport_size, 1.0);
+            let viewport_size = viewport_size
+                .max(spread_guard)
+                .clamp(self.config.min_viewport_size, 1.0);
 
             let viewport = Viewport::centered(
                 chunk.centroid.0,
@@ -308,9 +315,14 @@ impl AutoZoomAnalyzer {
                 sum_h += kf.viewport.h;
             }
 
+            let target_anchor = keyframes[i].viewport.center();
+            let mut viewport =
+                Viewport::new(sum_x / count, sum_y / count, sum_w / count, sum_h / count);
+            viewport = ensure_anchor_visible(viewport, target_anchor, 0.10);
+
             smoothed.push(CameraKeyframe {
                 time_secs: keyframes[i].time_secs,
-                viewport: Viewport::new(sum_x / count, sum_y / count, sum_w / count, sum_h / count),
+                viewport,
                 easing: keyframes[i].easing,
                 source: KeyframeSource::Auto,
             });
@@ -380,6 +392,32 @@ impl AutoZoomAnalyzer {
             })
             .collect()
     }
+}
+
+fn ensure_anchor_visible(viewport: Viewport, anchor: (f64, f64), padding_ratio: f64) -> Viewport {
+    let mut x = viewport.x;
+    let mut y = viewport.y;
+    let w = viewport.w;
+    let h = viewport.h;
+
+    let pad = padding_ratio.clamp(0.0, 0.45);
+    let inner_left = x + w * pad;
+    let inner_right = x + w * (1.0 - pad);
+    if anchor.0 < inner_left {
+        x -= inner_left - anchor.0;
+    } else if anchor.0 > inner_right {
+        x += anchor.0 - inner_right;
+    }
+
+    let inner_top = y + h * pad;
+    let inner_bottom = y + h * (1.0 - pad);
+    if anchor.1 < inner_top {
+        y -= inner_top - anchor.1;
+    } else if anchor.1 > inner_bottom {
+        y += anchor.1 - inner_bottom;
+    }
+
+    Viewport::new(x, y, w, h)
 }
 
 #[cfg(test)]
@@ -542,5 +580,59 @@ mod tests {
 
         let chunks = analyzer.chunk_events(&events);
         assert_eq!(chunks[0].activity, ActivityType::Scan);
+    }
+
+    #[test]
+    fn test_spread_guard_expands_viewport_for_fast_motion() {
+        let analyzer = AutoZoomAnalyzer::new(AutoZoomConfig {
+            hover_zoom: 0.55,
+            min_viewport_size: 0.4,
+            ..Default::default()
+        });
+        let chunks = vec![ChunkAnalysis {
+            start_secs: 0.0,
+            end_secs: 2.0,
+            centroid: (0.5, 0.5),
+            spread: 0.3,
+            velocity: 0.4,
+            sample_count: 30,
+            activity: ActivityType::Dwell,
+        }];
+
+        let keyframes = analyzer.generate_raw_keyframes(&chunks);
+        assert!((keyframes[0].viewport.w - 0.72).abs() < 1e-9);
+        assert!((keyframes[0].viewport.h - 0.72).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_smoothing_keeps_target_anchor_visible() {
+        let analyzer = AutoZoomAnalyzer::new(AutoZoomConfig {
+            smoothing_window: 3,
+            ..Default::default()
+        });
+        let keyframes = vec![
+            CameraKeyframe {
+                time_secs: 0.0,
+                viewport: Viewport::new(0.0, 0.0, 0.4, 0.4),
+                easing: EasingFunction::Linear,
+                source: KeyframeSource::Auto,
+            },
+            CameraKeyframe {
+                time_secs: 2.0,
+                viewport: Viewport::new(0.8, 0.0, 0.4, 0.4),
+                easing: EasingFunction::Linear,
+                source: KeyframeSource::Auto,
+            },
+            CameraKeyframe {
+                time_secs: 4.0,
+                viewport: Viewport::new(0.0, 0.0, 0.4, 0.4),
+                easing: EasingFunction::Linear,
+                source: KeyframeSource::Auto,
+            },
+        ];
+
+        let smoothed = analyzer.smooth_keyframes(&keyframes);
+        let anchor = keyframes[1].viewport.center();
+        assert!(smoothed[1].viewport.contains(anchor.0, anchor.1));
     }
 }

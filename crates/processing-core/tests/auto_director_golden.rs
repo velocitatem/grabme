@@ -53,8 +53,8 @@ fn auto_director_default_fixture_signature_is_stable() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert_eq!(timeline.keyframes.len(), 201);
-    assert_eq!(fnv1a_64(&signature), 0xbc5e0d057ef2da2f);
+    assert_eq!(timeline.keyframes.len(), 301);
+    assert_eq!(fnv1a_64(&signature), 0xb7ee4b19ac9e408e);
 }
 
 #[test]

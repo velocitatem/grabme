@@ -83,11 +83,11 @@ enum Commands {
         vertical: bool,
 
         /// Hover zoom viewport size (lower = tighter zoom)
-        #[arg(long, default_value = "0.4")]
+        #[arg(long, default_value = "0.55")]
         hover_zoom: f64,
 
         /// Scan zoom viewport size (higher = wider framing)
-        #[arg(long, default_value = "0.85")]
+        #[arg(long, default_value = "0.92")]
         scan_zoom: f64,
 
         /// Dwell radius threshold (normalized)
