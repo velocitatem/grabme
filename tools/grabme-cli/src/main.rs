@@ -46,6 +46,10 @@ enum Commands {
         #[arg(long, default_value = "60")]
         fps: u32,
 
+        /// Zero-based monitor index to record
+        #[arg(long, default_value = "0")]
+        monitor: usize,
+
         /// Disable microphone capture
         #[arg(long)]
         no_mic: bool,
@@ -97,6 +101,14 @@ enum Commands {
         /// Smoothing window for generated camera keyframes
         #[arg(long, default_value = "3")]
         smooth_window: usize,
+
+        /// Cursor smoothing algorithm for export: ema|bezier|kalman|none
+        #[arg(long, default_value = "ema")]
+        cursor_smoothing: String,
+
+        /// Cursor smoothing strength [0.0, 1.0]
+        #[arg(long, default_value = "0.3")]
+        cursor_smoothing_factor: f64,
 
         /// Number of monitors packed in the capture region
         #[arg(long, default_value = "1")]
@@ -174,10 +186,22 @@ async fn main() -> anyhow::Result<()> {
             name,
             output,
             fps,
+            monitor,
             no_mic,
             no_system_audio,
             webcam,
-        } => commands::record::run(name, output, fps, !no_mic, !no_system_audio, webcam).await,
+        } => {
+            commands::record::run(
+                name,
+                output,
+                fps,
+                monitor,
+                !no_mic,
+                !no_system_audio,
+                webcam,
+            )
+            .await
+        }
         Commands::Validate { path } => commands::validate::run(path),
         Commands::Analyze {
             path,
@@ -188,6 +212,8 @@ async fn main() -> anyhow::Result<()> {
             dwell_radius,
             dwell_velocity,
             smooth_window,
+            cursor_smoothing,
+            cursor_smoothing_factor,
             monitor_count,
             focused_monitor,
         } => commands::analyze::run(
@@ -199,6 +225,8 @@ async fn main() -> anyhow::Result<()> {
             dwell_radius,
             dwell_velocity,
             smooth_window,
+            cursor_smoothing,
+            cursor_smoothing_factor,
             monitor_count,
             focused_monitor,
         ),

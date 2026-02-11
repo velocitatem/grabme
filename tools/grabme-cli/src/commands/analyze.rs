@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use grabme_processing_core::auto_zoom::{AutoZoomAnalyzer, AutoZoomConfig};
 use grabme_processing_core::cursor_smooth::CursorSmoother;
 use grabme_project_model::event::parse_events;
+use grabme_project_model::timeline::SmoothingAlgorithm as TimelineSmoothingAlgorithm;
 use grabme_project_model::LoadedProject;
 
 #[allow(clippy::too_many_arguments)]
@@ -17,6 +18,8 @@ pub fn run(
     dwell_radius: f64,
     dwell_velocity: f64,
     smooth_window: usize,
+    cursor_smoothing: String,
+    cursor_smoothing_factor: f64,
     monitor_count: usize,
     focused_monitor: usize,
 ) -> anyhow::Result<()> {
@@ -49,6 +52,8 @@ pub fn run(
 
     // Run cursor smoothing
     let mut cursor_config = project.timeline.cursor_config.clone();
+    cursor_config.smoothing = parse_cursor_smoothing(&cursor_smoothing)?;
+    cursor_config.smoothing_factor = cursor_smoothing_factor.clamp(0.0, 1.0);
     if let Some(effect_strength) =
         project
             .timeline
@@ -101,6 +106,7 @@ pub fn run(
     }
 
     // Save updated timeline
+    project.timeline.cursor_config = cursor_config;
     project
         .save()
         .map_err(|e| anyhow::anyhow!("Failed to save timeline: {e}"))?;
@@ -112,4 +118,16 @@ pub fn run(
     println!("\nAnalysis complete.");
 
     Ok(())
+}
+
+fn parse_cursor_smoothing(raw: &str) -> anyhow::Result<TimelineSmoothingAlgorithm> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "ema" => Ok(TimelineSmoothingAlgorithm::Ema),
+        "bezier" => Ok(TimelineSmoothingAlgorithm::Bezier),
+        "kalman" => Ok(TimelineSmoothingAlgorithm::Kalman),
+        "none" => Ok(TimelineSmoothingAlgorithm::None),
+        other => Err(anyhow::anyhow!(
+            "Invalid cursor smoothing algorithm: {other}. Use one of: ema, bezier, kalman, none"
+        )),
+    }
 }

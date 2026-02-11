@@ -206,6 +206,16 @@ impl Timeline {
             return Viewport::FULL;
         }
 
+        // If there are multiple keyframes at exactly the same timestamp,
+        // prefer the last one (latest edit wins).
+        if let Some(exact) = self
+            .keyframes
+            .iter()
+            .rfind(|kf| (kf.time_secs - time_secs).abs() < 1e-9)
+        {
+            return exact.viewport;
+        }
+
         // Before first keyframe
         if time_secs <= self.keyframes[0].time_secs {
             return self.keyframes[0].viewport;
@@ -224,7 +234,7 @@ impl Timeline {
             if time_secs >= kf_a.time_secs && time_secs <= kf_b.time_secs {
                 let duration = kf_b.time_secs - kf_a.time_secs;
                 if duration < 1e-9 {
-                    return kf_a.viewport;
+                    continue;
                 }
                 let linear_t = (time_secs - kf_a.time_secs) / duration;
                 let eased_t = kf_a.easing.apply(linear_t);
@@ -352,5 +362,26 @@ mod tests {
         let parsed: Timeline = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.version, "1.0");
         assert_eq!(parsed.keyframes.len(), 1);
+    }
+
+    #[test]
+    fn test_viewport_at_prefers_last_duplicate_timestamp() {
+        let mut tl = Timeline::new();
+        tl.keyframes.clear();
+        tl.keyframes.push(CameraKeyframe {
+            time_secs: 0.0,
+            viewport: Viewport::FULL,
+            easing: EasingFunction::Linear,
+            source: KeyframeSource::Auto,
+        });
+        tl.keyframes.push(CameraKeyframe {
+            time_secs: 0.0,
+            viewport: Viewport::new(0.2, 0.2, 0.6, 0.6),
+            easing: EasingFunction::Linear,
+            source: KeyframeSource::Manual,
+        });
+
+        let vp = tl.viewport_at(0.0);
+        assert_eq!(vp, Viewport::new(0.2, 0.2, 0.6, 0.6));
     }
 }

@@ -10,6 +10,7 @@ pub async fn run(
     name: String,
     output: PathBuf,
     fps: u32,
+    monitor: usize,
     mic: bool,
     system_audio: bool,
     webcam: bool,
@@ -17,6 +18,7 @@ pub async fn run(
     println!("Starting recording session: {name}");
     println!("  Output: {}", output.display());
     println!("  FPS: {fps}");
+    println!("  Monitor: {monitor}");
     println!("  Mic: {mic}");
     println!("  System audio: {system_audio}");
     println!("  Webcam: {webcam}");
@@ -26,7 +28,9 @@ pub async fn run(
         name,
         output_dir: output,
         screen: ScreenCaptureConfig {
-            mode: CaptureMode::FullScreen { monitor_index: 0 },
+            mode: CaptureMode::FullScreen {
+                monitor_index: monitor,
+            },
             hide_cursor: true,
         },
         audio: AudioCaptureConfig {

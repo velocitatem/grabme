@@ -24,6 +24,14 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
     println!("  Scale factor: {}", p.recording.scale_factor);
     println!("  Display server: {:?}", p.recording.display_server);
     println!("  Cursor hidden: {}", p.recording.cursor_hidden);
+    println!("  Monitor index: {}", p.recording.monitor_index);
+    println!(
+        "  Monitor geometry: {}x{} @ ({}, {})",
+        p.recording.monitor_width,
+        p.recording.monitor_height,
+        p.recording.monitor_x,
+        p.recording.monitor_y
+    );
     println!();
 
     println!("Tracks:");

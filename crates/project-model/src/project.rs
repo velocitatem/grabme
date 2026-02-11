@@ -60,6 +60,27 @@ pub struct RecordingConfig {
     #[serde(default)]
     pub monitor_index: usize,
 
+    /// Monitor geometry at recording start (physical pixels).
+    #[serde(default)]
+    pub monitor_x: i32,
+    #[serde(default)]
+    pub monitor_y: i32,
+    #[serde(default)]
+    pub monitor_width: u32,
+    #[serde(default)]
+    pub monitor_height: u32,
+
+    /// Virtual desktop geometry at recording start (physical pixels).
+    /// Needed to remap global cursor coordinates to the captured monitor.
+    #[serde(default)]
+    pub virtual_x: i32,
+    #[serde(default)]
+    pub virtual_y: i32,
+    #[serde(default)]
+    pub virtual_width: u32,
+    #[serde(default)]
+    pub virtual_height: u32,
+
     /// Audio sample rate.
     pub audio_sample_rate: u32,
 }
@@ -204,6 +225,14 @@ impl Project {
                 display_server: DisplayServer::Wayland,
                 cursor_hidden: true,
                 monitor_index: 0,
+                monitor_x: 0,
+                monitor_y: 0,
+                monitor_width: width,
+                monitor_height: height,
+                virtual_x: 0,
+                virtual_y: 0,
+                virtual_width: width,
+                virtual_height: height,
                 audio_sample_rate: 48000,
             },
             tracks: Tracks {

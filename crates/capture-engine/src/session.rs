@@ -12,7 +12,9 @@ use grabme_platform_linux::portal::{
     close_session, is_portal_available, request_screencast, CursorMode,
 };
 use grabme_platform_linux::SourceType;
-use grabme_platform_linux::{detect_display_server, DisplayServer};
+use grabme_platform_linux::{
+    detect_display_server, detect_monitors, virtual_desktop_bounds, DisplayServer, MonitorInfo,
+};
 use grabme_project_model::{LoadedProject, TrackRef};
 
 use crate::pipeline::{
@@ -161,16 +163,54 @@ impl CaptureSession {
 
         tracing::info!(name = %self.config.name, "Starting capture session");
 
+        let display_server = detect_display_server();
+        tracing::info!(?display_server, "Detected display server");
+
+        let selected_monitor = self.selected_monitor();
+        let mut capture_width = self.detect_capture_width(selected_monitor.as_ref());
+        let mut capture_height = self.detect_capture_height(selected_monitor.as_ref());
+
         // Create project on disk
         let project_dir = self.config.output_dir.join(&self.config.name);
-        let project = LoadedProject::create(
+        let mut project = LoadedProject::create(
             &project_dir,
             &self.config.name,
-            self.detect_capture_width(),
-            self.detect_capture_height(),
+            capture_width,
+            capture_height,
             self.config.fps,
         )
         .map_err(|e| GrabmeError::capture(format!("Failed to create project: {e}")))?;
+        project.project.recording.monitor_index = self.selected_monitor_index();
+
+        if let Some(monitor) = selected_monitor.as_ref() {
+            project.project.recording.monitor_x = monitor.x;
+            project.project.recording.monitor_y = monitor.y;
+            project.project.recording.monitor_width = monitor.width;
+            project.project.recording.monitor_height = monitor.height;
+        } else {
+            project.project.recording.monitor_width = capture_width;
+            project.project.recording.monitor_height = capture_height;
+        }
+
+        let monitors = detect_monitors().unwrap_or_default();
+        if !monitors.is_empty() {
+            let (vx, vy, vw, vh) = virtual_desktop_bounds(&monitors);
+            project.project.recording.virtual_x = vx;
+            project.project.recording.virtual_y = vy;
+            project.project.recording.virtual_width = vw;
+            project.project.recording.virtual_height = vh;
+        } else {
+            project.project.recording.virtual_x = 0;
+            project.project.recording.virtual_y = 0;
+            project.project.recording.virtual_width = capture_width;
+            project.project.recording.virtual_height = capture_height;
+        }
+
+        project.project.recording.display_server = match display_server {
+            DisplayServer::Wayland => grabme_project_model::project::DisplayServer::Wayland,
+            DisplayServer::X11 => grabme_project_model::project::DisplayServer::X11,
+            DisplayServer::Unknown => grabme_project_model::project::DisplayServer::Wayland,
+        };
 
         // Start the recording clock
         let clock = RecordingClock::start();
@@ -182,11 +222,6 @@ impl CaptureSession {
 
         let sources_dir = project.root.join("sources");
         let screen_path = sources_dir.join("screen.mkv");
-        let capture_width = self.detect_capture_width();
-        let capture_height = self.detect_capture_height();
-
-        let display_server = detect_display_server();
-        tracing::info!(?display_server, "Detected display server");
         let mut screen_pipeline = match display_server {
             DisplayServer::Wayland => {
                 if !is_portal_available() {
@@ -201,7 +236,16 @@ impl CaptureSession {
                     CursorMode::Embedded
                 };
 
-                let portal_session = request_screencast(SourceType::Monitor, cursor_mode).await?;
+                let portal_session = request_screencast(
+                    SourceType::Monitor,
+                    cursor_mode,
+                    self.selected_monitor_index(),
+                )
+                .await?;
+                capture_width = portal_session.width;
+                capture_height = portal_session.height;
+                project.project.recording.capture_width = capture_width;
+                project.project.recording.capture_height = capture_height;
                 self.portal_session_handle = Some(portal_session.session_handle.clone());
                 build_screen_pipeline(
                     portal_session.pipewire_node_id,
@@ -215,6 +259,9 @@ impl CaptureSession {
                     &screen_path,
                     self.config.fps,
                     self.config.screen.hide_cursor,
+                    selected_monitor
+                        .as_ref()
+                        .map(|m| (m.x, m.y, m.width, m.height)),
                 )?
             }
             DisplayServer::Unknown => {
@@ -267,7 +314,10 @@ impl CaptureSession {
             clock.clone(),
             capture_width,
             capture_height,
-            1.0,
+            selected_monitor
+                .as_ref()
+                .map(|m| m.scale_factor)
+                .unwrap_or(1.0),
             self.config.pointer_sample_rate_hz,
         )?;
         self.stream_offsets_ns.events_ns = clock.elapsed_ns() as i64;
@@ -423,18 +473,36 @@ impl CaptureSession {
 
     // Internal helpers
 
-    fn detect_capture_width(&self) -> u32 {
+    fn detect_capture_width(&self, monitor: Option<&MonitorInfo>) -> u32 {
         match &self.config.screen.mode {
             CaptureMode::Region { width, .. } => *width,
-            _ => 1920, // TODO: detect from platform
+            _ => monitor.map(|m| m.width).unwrap_or(1920),
         }
     }
 
-    fn detect_capture_height(&self) -> u32 {
+    fn detect_capture_height(&self, monitor: Option<&MonitorInfo>) -> u32 {
         match &self.config.screen.mode {
             CaptureMode::Region { height, .. } => *height,
-            _ => 1080, // TODO: detect from platform
+            _ => monitor.map(|m| m.height).unwrap_or(1080),
         }
+    }
+
+    fn selected_monitor_index(&self) -> usize {
+        match self.config.screen.mode {
+            CaptureMode::FullScreen { monitor_index } => monitor_index,
+            _ => 0,
+        }
+    }
+
+    fn selected_monitor(&self) -> Option<MonitorInfo> {
+        let monitors = detect_monitors().ok()?;
+        let monitor_index = self.selected_monitor_index();
+
+        monitors
+            .get(monitor_index)
+            .cloned()
+            .or_else(|| monitors.iter().find(|m| m.primary).cloned())
+            .or_else(|| monitors.first().cloned())
     }
 
     fn log_clock_drift_check(&self) {

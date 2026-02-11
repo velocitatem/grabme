@@ -6,6 +6,8 @@ use grabme_capture_engine::{
     AudioCaptureConfig, CaptureMode, CaptureSession, ScreenCaptureConfig, SessionConfig,
     SessionState,
 };
+use grabme_processing_core::auto_zoom::{AutoZoomAnalyzer, AutoZoomConfig};
+use grabme_project_model::event::parse_events;
 use grabme_project_model::project::{AspectMode, ExportConfig, ExportFormat, LoadedProject};
 use grabme_project_model::timeline::{CameraKeyframe, EasingFunction, KeyframeSource};
 use grabme_project_model::viewport::Viewport;
@@ -115,7 +117,7 @@ impl OverlayRecorderApp {
                 mode: CaptureMode::FullScreen {
                     monitor_index: self.monitor_index,
                 },
-                hide_cursor: false,
+                hide_cursor: true,
             },
             audio: AudioCaptureConfig {
                 mic: self.mic,
@@ -438,12 +440,30 @@ fn auto_direct_project(project_path: &Path) -> anyhow::Result<usize> {
     let mut loaded = LoadedProject::load(project_path)
         .map_err(|e| anyhow::anyhow!("Failed to load project: {e}"))?;
 
-    loaded.timeline.keyframes = vec![CameraKeyframe {
-        time_secs: 0.0,
-        viewport: Viewport::FULL,
-        easing: EasingFunction::EaseInOut,
-        source: KeyframeSource::Auto,
-    }];
+    let events_path = project_path.join("meta").join("events.jsonl");
+    let events_raw = std::fs::read_to_string(&events_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read events at {}: {e}", events_path.display()))?;
+    let events = parse_events(&events_raw)
+        .map_err(|e| anyhow::anyhow!("Failed to parse events for auto-direct: {e}"))?;
+
+    if events.is_empty() {
+        loaded.timeline.keyframes = vec![CameraKeyframe {
+            time_secs: 0.0,
+            viewport: Viewport::FULL,
+            easing: EasingFunction::EaseInOut,
+            source: KeyframeSource::Auto,
+        }];
+    } else {
+        let config = AutoZoomConfig {
+            monitor_count: 1,
+            focused_monitor_index: loaded.project.recording.monitor_index,
+            ..Default::default()
+        };
+        let analyzer = AutoZoomAnalyzer::new(config);
+        let timeline = analyzer.analyze(&events);
+        loaded.timeline.keyframes = timeline.keyframes;
+    }
+
     loaded
         .save()
         .map_err(|e| anyhow::anyhow!("Failed to save auto-directed timeline: {e}"))?;

@@ -205,16 +205,8 @@ impl AutoZoomAnalyzer {
 
     /// Generate raw keyframes from chunk analysis.
     fn generate_raw_keyframes(&self, chunks: &[ChunkAnalysis]) -> Vec<CameraKeyframe> {
-        let mut keyframes = vec![];
+        let mut keyframes: Vec<CameraKeyframe> = vec![];
         let mut dwell_streak_secs = 0.0;
-
-        // Always start with full viewport
-        keyframes.push(CameraKeyframe {
-            time_secs: 0.0,
-            viewport: Viewport::FULL,
-            easing: EasingFunction::EaseInOut,
-            source: KeyframeSource::Auto,
-        });
 
         for chunk in chunks {
             dwell_streak_secs = match chunk.activity {
@@ -250,18 +242,38 @@ impl AutoZoomAnalyzer {
                 source: KeyframeSource::Auto,
             };
 
-            if keyframes
-                .last()
-                .map(|existing| {
-                    (existing.time_secs - keyframe.time_secs).abs() < 1e-6
-                        && existing.viewport == keyframe.viewport
-                })
-                .unwrap_or(false)
-            {
-                continue;
+            if let Some(existing) = keyframes.last_mut() {
+                if (existing.time_secs - keyframe.time_secs).abs() < 1e-6 {
+                    *existing = keyframe;
+                    continue;
+                }
+
+                if existing.viewport == keyframe.viewport {
+                    continue;
+                }
             }
 
             keyframes.push(keyframe);
+        }
+
+        if keyframes.is_empty() {
+            keyframes.push(CameraKeyframe {
+                time_secs: 0.0,
+                viewport: Viewport::FULL,
+                easing: EasingFunction::EaseInOut,
+                source: KeyframeSource::Auto,
+            });
+        } else if keyframes[0].time_secs > 0.0 {
+            let first_viewport = keyframes[0].viewport;
+            keyframes.insert(
+                0,
+                CameraKeyframe {
+                    time_secs: 0.0,
+                    viewport: first_viewport,
+                    easing: EasingFunction::EaseInOut,
+                    source: KeyframeSource::Auto,
+                },
+            );
         }
 
         keyframes
@@ -451,8 +463,9 @@ mod tests {
 
         // Should have keyframes
         assert!(timeline.keyframes.len() >= 2);
-        // First should be full viewport
-        assert_eq!(timeline.keyframes[0].viewport, Viewport::FULL);
+        // First keyframe should start at t=0 and be a valid viewport.
+        assert!((timeline.keyframes[0].time_secs - 0.0).abs() < 1e-9);
+        assert!(timeline.keyframes[0].viewport.w > 0.0);
     }
 
     #[test]

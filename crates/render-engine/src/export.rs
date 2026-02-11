@@ -8,6 +8,7 @@ use grabme_common::error::{GrabmeError, GrabmeResult};
 use grabme_processing_core::cursor_smooth::CursorSmoother;
 use grabme_project_model::event::{parse_events, InputEvent};
 use grabme_project_model::project::{ExportConfig, ExportFormat, LoadedProject};
+use grabme_project_model::viewport::Viewport;
 
 use crate::compositor::compute_compositions;
 
@@ -146,6 +147,7 @@ struct ExportPlan {
     total_frames: u64,
     expected_duration_secs: f64,
     smoothed_cursor: Vec<(u64, f64, f64)>,
+    cursor_projection_model: CursorCoordinateModel,
     debug_report: String,
 }
 
@@ -158,15 +160,17 @@ struct VerificationSummary {
 
 struct FfmpegBackend;
 
+#[allow(dead_code)]
 const MAX_VIEWPORT_EXPR_POINTS: usize = 48;
 #[allow(dead_code)]
-const MIN_CURSOR_EXPR_POINTS: usize = 64;
+const MIN_CURSOR_EXPR_POINTS: usize = 32;
 #[allow(dead_code)]
-const MAX_CURSOR_EXPR_POINTS: usize = 900;
+const MAX_CURSOR_EXPR_POINTS: usize = 96;
 #[allow(dead_code)]
-const CURSOR_EXPR_POINTS_PER_SEC: f64 = 2.5;
+const CURSOR_EXPR_POINTS_PER_SEC: f64 = 8.0;
 #[allow(dead_code)]
-const CURSOR_SIMPLIFY_TOLERANCE_PX: f64 = 0.8;
+const CURSOR_SIMPLIFY_TOLERANCE_PX: f64 = 0.1;
+const FORCE_FULL_SCREEN_RENDER: bool = true;
 
 impl FfmpegBackend {
     fn new() -> Self {
@@ -279,12 +283,20 @@ impl FfmpegBackend {
         let smoothing = CursorSmoother::algorithm_from_cursor_config(&cursor_config);
 
         let smoothed_cursor = CursorSmoother::new(smoothing).smooth(&inputs.events);
+        let cursor_projection = maybe_override_cursor_projection(
+            CursorProjection::from_recording_geometry(
+                &inputs.project.project.recording,
+                &smoothed_cursor,
+            ),
+            &inputs.project.project.recording,
+        );
+        let smoothed_cursor =
+            apply_cursor_projection(&smoothed_cursor, cursor_projection.transform);
         let fps = job.config.fps.max(1);
         let total_frames = (inputs.duration_secs * fps as f64).ceil() as u64;
 
-        let viewport_points = if let Some(focused_viewport) = derive_static_focus_viewport(inputs, &job.config)
-        {
-            vec![(0.0, focused_viewport), (inputs.duration_secs, focused_viewport)]
+        let viewport_points = if FORCE_FULL_SCREEN_RENDER {
+            vec![(0.0, Viewport::FULL), (inputs.duration_secs, Viewport::FULL)]
         } else {
             sample_viewport_points(
                 &inputs.project.timeline,
@@ -300,6 +312,28 @@ impl FfmpegBackend {
             build_piecewise_expr(viewport_points.iter().map(|(t, vp)| (*t, vp.w)).collect());
         let h_expr =
             build_piecewise_expr(viewport_points.iter().map(|(t, vp)| (*t, vp.h)).collect());
+        let cursor_points = if FORCE_FULL_SCREEN_RENDER {
+            sample_cursor_points_full_screen(
+                &smoothed_cursor,
+                job.config.width,
+                job.config.height,
+                inputs.duration_secs,
+                fps,
+            )
+        } else {
+            sample_cursor_points(
+                &smoothed_cursor,
+                &inputs.project.timeline,
+                job.config.width,
+                job.config.height,
+                inputs.duration_secs,
+                fps,
+            )
+        };
+        let cursor_x_expr =
+            build_piecewise_expr(cursor_points.iter().map(|(t, x, _)| (*t, *x)).collect());
+        let cursor_y_expr =
+            build_piecewise_expr(cursor_points.iter().map(|(t, _, y)| (*t, *y)).collect());
 
         let webcam_index = if inputs.webcam_path.is_some() {
             Some(1usize)
@@ -331,6 +365,8 @@ impl FfmpegBackend {
             &y_expr,
             &w_expr,
             &h_expr,
+            &cursor_x_expr,
+            &cursor_y_expr,
             webcam_index,
         );
         let filter_len = filter.len();
@@ -387,18 +423,24 @@ impl FfmpegBackend {
         args.push(job.output_path.display().to_string());
 
         let debug_report = format!(
-            "duration_secs={:.3}\nframes={}\nviewport_keyframes={}\nviewport_points={}\nsource_width={}\nsource_height={}\nsmoothed_cursor_points={}\nexpr_len_x={}\nexpr_len_y={}\nexpr_len_w={}\nexpr_len_h={}\nfilter_len={}\nffmpeg_args={}\nplan_build_ms={}\n",
+            "duration_secs={:.3}\nframes={}\nviewport_mode={}\nviewport_keyframes={}\nviewport_points={}\ncursor_projection_model={}\ncursor_projection_score={:.4}\nsource_width={}\nsource_height={}\nsmoothed_cursor_points={}\ncursor_points={}\nexpr_len_x={}\nexpr_len_y={}\nexpr_len_w={}\nexpr_len_h={}\nexpr_len_cursor_x={}\nexpr_len_cursor_y={}\nfilter_len={}\nffmpeg_args={}\nplan_build_ms={}\n",
             inputs.duration_secs,
             total_frames,
+            if FORCE_FULL_SCREEN_RENDER { "full_screen" } else { "timeline" },
             inputs.project.timeline.keyframes.len(),
             viewport_points.len(),
+            cursor_projection.model.as_str(),
+            cursor_projection.score,
             inputs.source_width,
             inputs.source_height,
             smoothed_cursor.len(),
+            cursor_points.len(),
             x_expr.len(),
             y_expr.len(),
             w_expr.len(),
             h_expr.len(),
+            cursor_x_expr.len(),
+            cursor_y_expr.len(),
             filter_len,
             args.join(" "),
             plan_started.elapsed().as_millis(),
@@ -409,7 +451,10 @@ impl FfmpegBackend {
             frames = total_frames,
             viewport_keyframes = inputs.project.timeline.keyframes.len(),
             viewport_points = viewport_points.len(),
+            cursor_projection_model = cursor_projection.model.as_str(),
+            cursor_projection_score = cursor_projection.score,
             smoothed_cursor_points = smoothed_cursor.len(),
+            cursor_points = cursor_points.len(),
             filter_len,
             "Export plan built"
         );
@@ -419,6 +464,7 @@ impl FfmpegBackend {
             total_frames,
             expected_duration_secs: inputs.duration_secs,
             smoothed_cursor,
+            cursor_projection_model: cursor_projection.model,
             debug_report,
         })
     }
@@ -624,6 +670,7 @@ impl RenderBackend for FfmpegBackend {
         if summary.out_of_bounds_cursors > 0 {
             tracing::warn!(
                 out_of_bounds = summary.out_of_bounds_cursors,
+                cursor_projection_model = plan.cursor_projection_model.as_str(),
                 "Visual verification found cursor coordinates outside output bounds"
             );
         }
@@ -654,28 +701,33 @@ fn strip_events_header(events_content: &str) -> String {
         .join("\n")
 }
 
+#[allow(dead_code)]
 fn sample_viewport_points(
     timeline: &grabme_project_model::timeline::Timeline,
     duration_secs: f64,
     max_points: usize,
 ) -> Vec<(f64, grabme_project_model::viewport::Viewport)> {
-    let mut key_times: Vec<f64> = timeline.keyframes.iter().map(|k| k.time_secs).collect();
-    key_times.push(duration_secs);
-    key_times.sort_by(f64::total_cmp);
-    key_times.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-
-    if key_times.is_empty() {
-        key_times.push(0.0);
+    if duration_secs <= 0.0 {
+        return vec![(0.0, timeline.viewport_at(0.0))];
     }
 
-    let points: Vec<(f64, grabme_project_model::viewport::Viewport)> = key_times
-        .into_iter()
-        .map(|t| (t, timeline.viewport_at(t)))
-        .collect();
+    // Sample uniformly across duration so easing curves are captured in
+    // FFmpeg piecewise expressions (keyframe-only sampling flattens easing).
+    let target_points = max_points.max(2);
+    let mut points = Vec::with_capacity(target_points);
+    for i in 0..target_points {
+        let t = if target_points == 1 {
+            0.0
+        } else {
+            duration_secs * (i as f64 / (target_points - 1) as f64)
+        };
+        points.push((t, timeline.viewport_at(t)));
+    }
 
-    downsample_timed_points(points, max_points.max(2))
+    points
 }
 
+#[allow(dead_code)]
 fn derive_static_focus_viewport(
     inputs: &LoadedExportInputs,
     config: &ExportConfig,
@@ -705,18 +757,26 @@ fn derive_static_focus_viewport(
         .unwrap_or(0.5)
         .clamp(0.0, 1.0);
 
-    let estimated_monitor_width = config.width.max(1) as f64;
-    let estimated_count = (source_w / estimated_monitor_width).round() as usize;
-    let monitor_count = estimated_count.clamp(1, 8);
+    let recording = &inputs.project.project.recording;
+    let has_recorded_monitor_geometry = recording.monitor_width > 0 && recording.monitor_height > 0;
 
-    let slot_w = 1.0 / monitor_count as f64;
-    let configured_monitor_index = inputs.project.project.recording.monitor_index;
-    let monitor_index = if configured_monitor_index < monitor_count {
-        configured_monitor_index
+    let (slot_x, slot_w) = if has_recorded_monitor_geometry {
+        let slot_w = (recording.monitor_width as f64 / source_w).clamp(0.05, 1.0);
+        let slot_x = (recording.monitor_x as f64 / source_w).clamp(0.0, 1.0 - slot_w);
+        (slot_x, slot_w)
     } else {
-        select_focus_monitor_index(&inputs.events, monitor_count, focus_x)
+        let estimated_monitor_width = config.width.max(1) as f64;
+        let estimated_count = (source_w / estimated_monitor_width).round() as usize;
+        let monitor_count = estimated_count.clamp(1, 8);
+        let slot_w = 1.0 / monitor_count as f64;
+        let configured_monitor_index = recording.monitor_index;
+        let monitor_index = if configured_monitor_index < monitor_count {
+            configured_monitor_index
+        } else {
+            select_focus_monitor_index(&inputs.events, monitor_count, focus_x)
+        };
+        (monitor_index as f64 * slot_w, slot_w)
     };
-    let slot_x = monitor_index as f64 * slot_w;
 
     let slot_aspect = source_aspect * slot_w;
 
@@ -724,14 +784,19 @@ fn derive_static_focus_viewport(
         let w = (target_aspect / source_aspect).clamp(0.01, slot_w);
         let local_x = ((focus_x - slot_x) / slot_w).clamp(0.0, 1.0);
         let x = (slot_x + (slot_w - w) * local_x).clamp(slot_x, slot_x + slot_w - w);
-        Some(grabme_project_model::viewport::Viewport::new(x, 0.0, w, 1.0))
+        Some(grabme_project_model::viewport::Viewport::new(
+            x, 0.0, w, 1.0,
+        ))
     } else {
         let h = (slot_aspect / target_aspect).clamp(0.01, 1.0);
         let y = ((1.0 - h) * focus_y).clamp(0.0, 1.0 - h);
-        Some(grabme_project_model::viewport::Viewport::new(slot_x, y, slot_w, h))
+        Some(grabme_project_model::viewport::Viewport::new(
+            slot_x, y, slot_w, h,
+        ))
     }
 }
 
+#[allow(dead_code)]
 fn median_pointer_axis(events: &[InputEvent], x_axis: bool) -> Option<f64> {
     let mut values: Vec<f64> = events
         .iter()
@@ -747,6 +812,7 @@ fn median_pointer_axis(events: &[InputEvent], x_axis: bool) -> Option<f64> {
     Some(values[values.len() / 2])
 }
 
+#[allow(dead_code)]
 fn latest_pointer_axis(events: &[InputEvent], x_axis: bool) -> Option<f64> {
     events
         .iter()
@@ -756,7 +822,12 @@ fn latest_pointer_axis(events: &[InputEvent], x_axis: bool) -> Option<f64> {
         .next()
 }
 
-fn select_focus_monitor_index(events: &[InputEvent], monitor_count: usize, fallback_x: f64) -> usize {
+#[allow(dead_code)]
+fn select_focus_monitor_index(
+    events: &[InputEvent],
+    monitor_count: usize,
+    fallback_x: f64,
+) -> usize {
     if monitor_count <= 1 {
         return 0;
     }
@@ -791,22 +862,37 @@ fn select_focus_monitor_index(events: &[InputEvent], monitor_count: usize, fallb
 #[allow(dead_code)]
 fn sample_cursor_points(
     smoothed_cursor: &[(u64, f64, f64)],
-    project: &LoadedProject,
+    timeline: &grabme_project_model::timeline::Timeline,
     out_w: u32,
     out_h: u32,
     duration_secs: f64,
     fps: u32,
 ) -> Vec<(f64, f64, f64)> {
     if smoothed_cursor.is_empty() {
-        return vec![(0.0, out_w as f64 / 2.0, out_h as f64 / 2.0)];
+        return vec![
+            (0.0, out_w as f64 / 2.0, out_h as f64 / 2.0),
+            (duration_secs, out_w as f64 / 2.0, out_h as f64 / 2.0),
+        ];
     }
 
-    let mut points = Vec::with_capacity(smoothed_cursor.len() + 1);
-    for &(ts, x, y) in smoothed_cursor {
-        let t_secs = (ts as f64 / 1_000_000_000.0).clamp(0.0, duration_secs);
-        let viewport = project.timeline.viewport_at(t_secs);
-        let (px, py) = project_to_output_coords(x, y, viewport, out_w, out_h);
+    let total_frames = (duration_secs * fps as f64).ceil() as u64;
+    let mut points = Vec::with_capacity(total_frames as usize + 1);
+    for frame in 0..total_frames {
+        let t_secs = frame as f64 / fps.max(1) as f64;
+        let t_ns = (t_secs * 1_000_000_000.0).round() as u64;
+        let Some(pos) = CursorSmoother::position_at(smoothed_cursor, t_ns) else {
+            continue;
+        };
+        let viewport = timeline.viewport_at(t_secs);
+        let (px, py) = project_to_output_coords(pos.x, pos.y, viewport, out_w, out_h);
         points.push((t_secs, px, py));
+    }
+
+    let end_ns = (duration_secs * 1_000_000_000.0).round() as u64;
+    if let Some(end_pos) = CursorSmoother::position_at(smoothed_cursor, end_ns) {
+        let viewport = timeline.viewport_at(duration_secs);
+        let (px, py) = project_to_output_coords(end_pos.x, end_pos.y, viewport, out_w, out_h);
+        points.push((duration_secs, px, py));
     }
 
     points.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -827,10 +913,11 @@ fn sample_cursor_points(
 
 #[allow(dead_code)]
 fn derive_cursor_expr_point_budget(duration_secs: f64, fps: u32) -> usize {
-    let fps = fps.max(1) as usize;
-    let expected = (duration_secs.max(1.0) * CURSOR_EXPR_POINTS_PER_SEC).round() as usize;
-    let floor = MIN_CURSOR_EXPR_POINTS.max(fps * 2);
-    let cap = MAX_CURSOR_EXPR_POINTS.min((duration_secs.max(1.0) * fps as f64).round() as usize);
+    let fps = fps.max(1) as f64;
+    let per_sec = CURSOR_EXPR_POINTS_PER_SEC.min(fps).max(1.0);
+    let expected = (duration_secs.max(1.0) * per_sec).round() as usize;
+    let floor = MIN_CURSOR_EXPR_POINTS;
+    let cap = MAX_CURSOR_EXPR_POINTS.min((duration_secs.max(1.0) * fps).round() as usize);
     expected.max(floor).min(cap).max(2)
 }
 
@@ -942,6 +1029,262 @@ fn project_to_output_coords(
     (local_x * out_w as f64, local_y * out_h as f64)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CursorProjection {
+    model: CursorCoordinateModel,
+    transform: PlaneTransform,
+    score: f64,
+}
+
+impl CursorProjection {
+    fn from_recording_geometry(
+        recording: &grabme_project_model::project::RecordingConfig,
+        smoothed_cursor: &[(u64, f64, f64)],
+    ) -> Self {
+        let capture_candidate = ProjectionCandidate {
+            model: CursorCoordinateModel::CaptureNormalized,
+            transform: PlaneTransform::identity(),
+        };
+
+        let mut candidates = vec![capture_candidate];
+        candidates.extend(virtual_desktop_projection_candidates(recording));
+
+        let mut best = capture_candidate;
+        let mut best_score = score_projection_candidate(capture_candidate, smoothed_cursor);
+        for candidate in candidates.into_iter().skip(1) {
+            let score = score_projection_candidate(candidate, smoothed_cursor);
+            if score > best_score {
+                best = candidate;
+                best_score = score;
+            }
+        }
+
+        Self {
+            model: best.model,
+            transform: best.transform,
+            score: best_score,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorCoordinateModel {
+    CaptureNormalized,
+    VirtualDesktopNormalized,
+    VirtualDesktopRootOrigin,
+}
+
+impl CursorCoordinateModel {
+    fn as_str(self) -> &'static str {
+        match self {
+            CursorCoordinateModel::CaptureNormalized => "capture_normalized",
+            CursorCoordinateModel::VirtualDesktopNormalized => "virtual_desktop_normalized",
+            CursorCoordinateModel::VirtualDesktopRootOrigin => "virtual_desktop_root_origin",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProjectionCandidate {
+    model: CursorCoordinateModel,
+    transform: PlaneTransform,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlaneTransform {
+    m: [[f64; 3]; 3],
+}
+
+impl PlaneTransform {
+    fn identity() -> Self {
+        Self {
+            m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        }
+    }
+
+    fn from_affine(scale_x: f64, scale_y: f64, tx: f64, ty: f64) -> Self {
+        Self {
+            m: [[scale_x, 0.0, tx], [0.0, scale_y, ty], [0.0, 0.0, 1.0]],
+        }
+    }
+
+    fn project(self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let xh = self.m[0][0] * x + self.m[0][1] * y + self.m[0][2];
+        let yh = self.m[1][0] * x + self.m[1][1] * y + self.m[1][2];
+        let wh = self.m[2][0] * x + self.m[2][1] * y + self.m[2][2];
+        if wh.abs() < 1e-9 {
+            return None;
+        }
+        Some((xh / wh, yh / wh))
+    }
+}
+
+fn virtual_desktop_projection_candidates(
+    recording: &grabme_project_model::project::RecordingConfig,
+) -> Vec<ProjectionCandidate> {
+    let monitor_w = recording.monitor_width as f64;
+    let monitor_h = recording.monitor_height as f64;
+    let virtual_w = recording.virtual_width as f64;
+    let virtual_h = recording.virtual_height as f64;
+    if monitor_w <= 0.0 || monitor_h <= 0.0 || virtual_w <= 0.0 || virtual_h <= 0.0 {
+        return vec![];
+    }
+
+    // Event coordinates in [0,1] are interpreted in virtual-desktop-normalized
+    // space and projected into capture-normalized (monitor) space.
+    let scale_x = virtual_w / monitor_w;
+    let scale_y = virtual_h / monitor_h;
+    let tx_bounds = (recording.virtual_x as f64 - recording.monitor_x as f64) / monitor_w;
+    let ty_bounds = (recording.virtual_y as f64 - recording.monitor_y as f64) / monitor_h;
+    let tx_root = -(recording.monitor_x as f64) / monitor_w;
+    let ty_root = -(recording.monitor_y as f64) / monitor_h;
+
+    let bounds_candidate = ProjectionCandidate {
+        model: CursorCoordinateModel::VirtualDesktopNormalized,
+        transform: PlaneTransform::from_affine(scale_x, scale_y, tx_bounds, ty_bounds),
+    };
+
+    if (tx_bounds - tx_root).abs() < 1e-9 && (ty_bounds - ty_root).abs() < 1e-9 {
+        return vec![bounds_candidate];
+    }
+
+    vec![
+        bounds_candidate,
+        ProjectionCandidate {
+            model: CursorCoordinateModel::VirtualDesktopRootOrigin,
+            transform: PlaneTransform::from_affine(scale_x, scale_y, tx_root, ty_root),
+        },
+    ]
+}
+
+fn maybe_override_cursor_projection(
+    selected: CursorProjection,
+    recording: &grabme_project_model::project::RecordingConfig,
+) -> CursorProjection {
+    let Ok(raw) = std::env::var("GRABME_CURSOR_PROJECTION") else {
+        return selected;
+    };
+
+    let mode = raw.trim().to_ascii_lowercase();
+    let override_candidate = match mode.as_str() {
+        "capture" | "capture_normalized" => Some(ProjectionCandidate {
+            model: CursorCoordinateModel::CaptureNormalized,
+            transform: PlaneTransform::identity(),
+        }),
+        "virtual" | "virtual_desktop" | "virtual_desktop_normalized" => {
+            virtual_desktop_projection_candidates(recording)
+                .into_iter()
+                .find(|c| c.model == CursorCoordinateModel::VirtualDesktopNormalized)
+        }
+        "virtual_root" | "root" | "virtual_desktop_root_origin" => {
+            virtual_desktop_projection_candidates(recording)
+                .into_iter()
+                .find(|c| c.model == CursorCoordinateModel::VirtualDesktopRootOrigin)
+        }
+        _ => None,
+    };
+
+    let Some(candidate) = override_candidate else {
+        tracing::warn!(
+            value = %raw,
+            "Ignoring unknown GRABME_CURSOR_PROJECTION override"
+        );
+        return selected;
+    };
+
+    tracing::info!(
+        selected = selected.model.as_str(),
+        overridden = candidate.model.as_str(),
+        "Applying cursor projection override"
+    );
+
+    CursorProjection {
+        model: candidate.model,
+        transform: candidate.transform,
+        score: selected.score,
+    }
+}
+
+fn apply_cursor_projection(
+    smoothed_cursor: &[(u64, f64, f64)],
+    transform: PlaneTransform,
+) -> Vec<(u64, f64, f64)> {
+    smoothed_cursor
+        .iter()
+        .map(|(t, x, y)| {
+            let (px, py) = transform.project(*x, *y).unwrap_or((*x, *y));
+            (*t, px.clamp(0.0, 1.0), py.clamp(0.0, 1.0))
+        })
+        .collect()
+}
+
+fn score_projection_candidate(
+    candidate: ProjectionCandidate,
+    smoothed_cursor: &[(u64, f64, f64)],
+) -> f64 {
+    if smoothed_cursor.is_empty() {
+        return 0.0;
+    }
+
+    let sample_stride = ((smoothed_cursor.len() as f64) / 1024.0).ceil() as usize;
+    let sample_stride = sample_stride.max(1);
+
+    let mut sampled = 0usize;
+    let mut in_bounds = 0usize;
+    let mut near_border = 0usize;
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    for (_, x, y) in smoothed_cursor.iter().step_by(sample_stride) {
+        let Some((px, py)) = candidate.transform.project(*x, *y) else {
+            continue;
+        };
+        if !px.is_finite() || !py.is_finite() {
+            continue;
+        }
+
+        sampled += 1;
+        if (0.0..=1.0).contains(&px) && (0.0..=1.0).contains(&py) {
+            in_bounds += 1;
+            min_x = min_x.min(px);
+            max_x = max_x.max(px);
+            min_y = min_y.min(py);
+            max_y = max_y.max(py);
+            if px <= 0.01 || px >= 0.99 || py <= 0.01 || py >= 0.99 {
+                near_border += 1;
+            }
+        }
+    }
+
+    if sampled == 0 {
+        return -1.0;
+    }
+
+    let in_bounds_ratio = in_bounds as f64 / sampled as f64;
+    let span_x = if min_x.is_finite() && max_x.is_finite() {
+        (max_x - min_x).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let span_y = if min_y.is_finite() && max_y.is_finite() {
+        (max_y - min_y).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let span_score = (span_x + span_y).clamp(0.0, 1.5);
+    let border_ratio = if in_bounds > 0 {
+        near_border as f64 / in_bounds as f64
+    } else {
+        1.0
+    };
+
+    // Prefer candidates that keep points in-bounds, preserve usable motion span,
+    // and avoid pathological edge-sticking.
+    in_bounds_ratio * 4.0 + span_score - border_ratio * 0.75
+}
+
 fn build_piecewise_expr(mut points: Vec<(f64, f64)>) -> String {
     if points.is_empty() {
         return "0".to_string();
@@ -949,6 +1292,20 @@ fn build_piecewise_expr(mut points: Vec<(f64, f64)>) -> String {
 
     points.sort_by(|a, b| a.0.total_cmp(&b.0));
     points.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
+
+    let mut sanitized: Vec<(f64, f64)> = Vec::with_capacity(points.len());
+    for (t, v) in points {
+        if let Some((last_t, last_v)) = sanitized.last_mut() {
+            if (t - *last_t).abs() < 1e-4 {
+                *last_t = t;
+                *last_v = v;
+                continue;
+            }
+        }
+        sanitized.push((t, v));
+    }
+
+    let points = sanitized;
 
     if points.len() == 1 {
         return format!("{:.6}", points[0].1);
@@ -965,7 +1322,7 @@ fn build_piecewise_expr(mut points: Vec<(f64, f64)>) -> String {
         let interp = format!(
             "{v0:.6}+({delta:.6})*(t-{t0:.6})/{dur:.6}",
             delta = v1 - v0,
-            dur = t1 - t0
+            dur = (t1 - t0).max(1e-4)
         );
         expr = format!("if(lt(t,{t1:.6}),{interp},{tail})", tail = expr);
     }
@@ -979,16 +1336,21 @@ fn build_filter_graph(
     y_expr: &str,
     w_expr: &str,
     h_expr: &str,
+    cursor_x_expr: &str,
+    cursor_y_expr: &str,
     webcam_index: Option<usize>,
 ) -> String {
     let mut graph = String::new();
 
     graph.push_str(&format!(
-        "[0:v]crop=w='iw*({w})':h='ih*({h})':x='iw*({x})':y='ih*({y})',scale={out_w}:{out_h}:flags=lanczos,format=yuv420p[base]",
+        "[0:v]crop=w='iw*({w})':h='ih*({h})':x='iw*({x})':y='ih*({y})',scale={out_w}:{out_h}:flags=lanczos,format=yuv420p[base];color=c=black@0.0:s=24x24:r={fps},format=rgba,drawbox=x=11:y=0:w=2:h=24:color=black@1.0:t=fill:replace=1,drawbox=x=0:y=11:w=24:h=2:color=black@1.0:t=fill:replace=1,drawbox=x=12:y=2:w=1:h=20:color=yellow@1.0:t=fill:replace=1,drawbox=x=2:y=12:w=20:h=1:color=yellow@1.0:t=fill:replace=1[cursor_sprite];[base][cursor_sprite]overlay=x='({cx})-12':y='({cy})-12':eval=frame[scene]",
         w = w_expr,
         h = h_expr,
         x = x_expr,
         y = y_expr,
+        cx = cursor_x_expr,
+        cy = cursor_y_expr,
+        fps = config.fps.max(1),
         out_w = config.width,
         out_h = config.height,
     ));
@@ -1000,7 +1362,7 @@ fn build_filter_graph(
         let margin_y = (config.height as f64 * 0.03).round() as u32;
 
         graph.push_str(&format!(
-            ";[{webcam}:v]scale={webcam_w}:{webcam_h}:flags=lanczos,format=yuva420p,colorchannelmixer=aa=0.92[webcam];[base][webcam]overlay=x=W-w-{mx}:y=H-h-{my}[vout]",
+            ";[{webcam}:v]scale={webcam_w}:{webcam_h}:flags=lanczos,format=yuva420p,colorchannelmixer=aa=0.92[webcam];[scene][webcam]overlay=x=W-w-{mx}:y=H-h-{my}[vout]",
             webcam = webcam_idx,
             webcam_w = webcam_w.max(2),
             webcam_h = webcam_h.max(2),
@@ -1008,7 +1370,7 @@ fn build_filter_graph(
             my = margin_y,
         ));
     } else {
-        graph.push_str(";[base]null[vout]");
+        graph.push_str(";[scene]null[vout]");
     }
 
     graph
@@ -1186,6 +1548,7 @@ pub async fn export_to_clipboard(job: ExportJob) -> GrabmeResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_strip_events_header() {
@@ -1210,6 +1573,12 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_expr_budget_respects_fps_upper_bound() {
+        let budget = derive_cursor_expr_point_budget(10.0, 12);
+        assert!(budget <= 120);
+    }
+
+    #[test]
     fn test_simplify_cursor_points_preserves_endpoints() {
         let mut points = Vec::new();
         for i in 0..100 {
@@ -1223,5 +1592,170 @@ mod tests {
         assert!(simplified.len() <= 20);
         assert_eq!(simplified.first().unwrap(), points.first().unwrap());
         assert_eq!(simplified.last().unwrap(), points.last().unwrap());
+    }
+
+    #[test]
+    fn test_sample_viewport_points_captures_intermediate_motion() {
+        let mut timeline = grabme_project_model::timeline::Timeline::new();
+        timeline.keyframes.clear();
+        timeline
+            .keyframes
+            .push(grabme_project_model::timeline::CameraKeyframe {
+                time_secs: 0.0,
+                viewport: grabme_project_model::viewport::Viewport::new(0.0, 0.0, 1.0, 1.0),
+                easing: grabme_project_model::timeline::EasingFunction::EaseInOut,
+                source: grabme_project_model::timeline::KeyframeSource::Auto,
+            });
+        timeline
+            .keyframes
+            .push(grabme_project_model::timeline::CameraKeyframe {
+                time_secs: 10.0,
+                viewport: grabme_project_model::viewport::Viewport::new(0.4, 0.2, 0.6, 0.6),
+                easing: grabme_project_model::timeline::EasingFunction::Linear,
+                source: grabme_project_model::timeline::KeyframeSource::Auto,
+            });
+
+        let points = sample_viewport_points(&timeline, 10.0, 7);
+        assert_eq!(points.len(), 7);
+        assert!((points.first().unwrap().0 - 0.0).abs() < 1e-9);
+        assert!((points.last().unwrap().0 - 10.0).abs() < 1e-9);
+
+        // Ensure there is actual interpolation between endpoints.
+        assert!(points[3].1.x > 0.0);
+        assert!(points[3].1.w < 1.0);
+    }
+
+    #[test]
+    fn test_sample_viewport_points_prefers_latest_duplicate_time() {
+        let mut timeline = grabme_project_model::timeline::Timeline::new();
+        timeline.keyframes.clear();
+        timeline
+            .keyframes
+            .push(grabme_project_model::timeline::CameraKeyframe {
+                time_secs: 0.0,
+                viewport: grabme_project_model::viewport::Viewport::FULL,
+                easing: grabme_project_model::timeline::EasingFunction::Linear,
+                source: grabme_project_model::timeline::KeyframeSource::Auto,
+            });
+        timeline
+            .keyframes
+            .push(grabme_project_model::timeline::CameraKeyframe {
+                time_secs: 0.0,
+                viewport: grabme_project_model::viewport::Viewport::new(0.2, 0.2, 0.6, 0.6),
+                easing: grabme_project_model::timeline::EasingFunction::Linear,
+                source: grabme_project_model::timeline::KeyframeSource::Manual,
+            });
+
+        let points = sample_viewport_points(&timeline, 2.0, 4);
+        assert_eq!(
+            points[0].1,
+            grabme_project_model::viewport::Viewport::new(0.2, 0.2, 0.6, 0.6)
+        );
+    }
+
+    #[test]
+    fn test_cursor_projection_prefers_virtual_desktop_mapping_when_monitor_slot_fits() {
+        let project = mock_project_with_geometry(0, 0, 1920, 1080, 0, 0, 4480, 1440);
+        let smoothed = vec![
+            (0u64, 0.20, 0.50),
+            (16_000_000u64, 0.30, 0.52),
+            (32_000_000u64, 0.38, 0.55),
+            (48_000_000u64, 0.41, 0.58),
+        ];
+
+        let projection =
+            CursorProjection::from_recording_geometry(&project.project.recording, &smoothed);
+        assert_eq!(
+            projection.model,
+            CursorCoordinateModel::VirtualDesktopNormalized
+        );
+
+        let projected = apply_cursor_projection(&smoothed, projection.transform);
+        assert!(projected[1].1 > smoothed[1].1);
+    }
+
+    #[test]
+    fn test_cursor_projection_prefers_bounds_origin_virtual_mapping() {
+        let project = mock_project_with_geometry(0, 0, 2560, 1440, -1920, 0, 4480, 1440);
+        let smoothed = vec![
+            // points normalized with desktop-bounds origin (x - virtual_min_x) / virtual_w
+            (0u64, 0.5714, 0.3000),
+            (16_000_000u64, 0.6429, 0.3200),
+            (32_000_000u64, 0.6964, 0.3500),
+        ];
+
+        let projection =
+            CursorProjection::from_recording_geometry(&project.project.recording, &smoothed);
+        assert_eq!(
+            projection.model,
+            CursorCoordinateModel::VirtualDesktopNormalized
+        );
+    }
+
+    #[test]
+    fn test_cursor_projection_prefers_root_origin_virtual_mapping_for_legacy_events() {
+        let project = mock_project_with_geometry(0, 0, 2560, 1440, -1920, 0, 4480, 1440);
+        let smoothed = vec![
+            // points normalized against root-space origin x / virtual_w (legacy bug path)
+            (0u64, 0.1429, 0.3000),
+            (16_000_000u64, 0.2143, 0.3200),
+            (32_000_000u64, 0.2679, 0.3500),
+        ];
+
+        let projection =
+            CursorProjection::from_recording_geometry(&project.project.recording, &smoothed);
+        assert_eq!(
+            projection.model,
+            CursorCoordinateModel::VirtualDesktopRootOrigin
+        );
+    }
+
+    #[test]
+    fn test_sample_cursor_points_applies_viewport_projection() {
+        let mut timeline = grabme_project_model::timeline::Timeline::new();
+        timeline.keyframes.clear();
+        timeline
+            .keyframes
+            .push(grabme_project_model::timeline::CameraKeyframe {
+                time_secs: 0.0,
+                viewport: grabme_project_model::viewport::Viewport::new(0.25, 0.25, 0.5, 0.5),
+                easing: grabme_project_model::timeline::EasingFunction::Linear,
+                source: grabme_project_model::timeline::KeyframeSource::Auto,
+            });
+
+        let smoothed = vec![(0u64, 0.25, 0.25), (1_000_000_000u64, 0.25, 0.25)];
+        let points = sample_cursor_points(&smoothed, &timeline, 1920, 1080, 1.0, 2);
+
+        assert!(!points.is_empty());
+        assert!(points[0].1.abs() < 1e-6);
+        assert!(points[0].2.abs() < 1e-6);
+    }
+
+    fn mock_project_with_geometry(
+        monitor_x: i32,
+        monitor_y: i32,
+        monitor_w: u32,
+        monitor_h: u32,
+        virtual_x: i32,
+        virtual_y: i32,
+        virtual_w: u32,
+        virtual_h: u32,
+    ) -> LoadedProject {
+        let mut project =
+            grabme_project_model::project::Project::new("test", monitor_w, monitor_h, 60);
+        project.recording.monitor_x = monitor_x;
+        project.recording.monitor_y = monitor_y;
+        project.recording.monitor_width = monitor_w;
+        project.recording.monitor_height = monitor_h;
+        project.recording.virtual_x = virtual_x;
+        project.recording.virtual_y = virtual_y;
+        project.recording.virtual_width = virtual_w;
+        project.recording.virtual_height = virtual_h;
+
+        LoadedProject {
+            root: PathBuf::new(),
+            project,
+            timeline: grabme_project_model::timeline::Timeline::new(),
+        }
     }
 }

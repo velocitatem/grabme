@@ -160,11 +160,21 @@ pub fn build_x11_screen_pipeline(
     output_path: &Path,
     fps: u32,
     hide_cursor: bool,
+    capture_region: Option<(i32, i32, u32, u32)>,
 ) -> GrabmeResult<Box<dyn CapturePipeline>> {
     let path = escape_path(output_path);
     let show_pointer = if hide_cursor { "false" } else { "true" };
+    let region = capture_region
+        .map(|(x, y, width, height)| {
+            format!(
+                " startx={x} starty={y} endx={} endy={}",
+                x + width as i32,
+                y + height as i32
+            )
+        })
+        .unwrap_or_default();
     let launch = format!(
-        "ximagesrc use-damage=false show-pointer={show_pointer} ! videoconvert ! videorate ! video/x-raw,framerate={fps}/1 ! x264enc tune=zerolatency speed-preset=veryfast ! matroskamux ! filesink location=\"{path}\""
+        "ximagesrc use-damage=false show-pointer={show_pointer}{region} ! videoconvert ! videorate ! video/x-raw,framerate={fps}/1 ! x264enc tune=zerolatency speed-preset=veryfast ! matroskamux ! filesink location=\"{path}\""
     );
     Ok(Box::new(GstCapturePipeline::from_launch(
         "screen-x11",

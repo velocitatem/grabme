@@ -173,7 +173,8 @@ impl InputEvent {
 pub fn parse_events(jsonl: &str) -> Result<Vec<InputEvent>, serde_json::Error> {
     jsonl
         .lines()
-        .filter(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(serde_json::from_str)
         .collect()
 }
@@ -232,6 +233,15 @@ mod tests {
         let jsonl = serialize_events(&events).unwrap();
         let parsed = parse_events(&jsonl).unwrap();
         assert_eq!(events, parsed);
+    }
+
+    #[test]
+    fn test_parse_events_skips_header_comment() {
+        let jsonl =
+            "# {\"schema_version\":\"1.0\"}\n{\"t\":0,\"type\":\"pointer\",\"x\":0.5,\"y\":0.3}\n";
+        let parsed = parse_events(jsonl).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].timestamp_ns, 0);
     }
 
     #[test]

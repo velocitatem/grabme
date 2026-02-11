@@ -75,6 +75,7 @@ pub struct PortalSession {
 pub async fn request_screencast(
     source_type: SourceType,
     cursor_mode: CursorMode,
+    monitor_index: usize,
 ) -> GrabmeResult<PortalSession> {
     tracing::info!(
         source = ?source_type,
@@ -112,9 +113,10 @@ pub async fn request_screencast(
         .response()
         .map_err(|e| GrabmeError::platform(format!("Portal start response failed: {e}")))?;
 
-    let stream = streams
-        .streams()
-        .first()
+    let available_streams = streams.streams();
+    let stream = available_streams
+        .get(monitor_index)
+        .or_else(|| available_streams.first())
         .ok_or_else(|| GrabmeError::platform("Portal returned no screencast streams"))?;
 
     let (width, height) = stream
