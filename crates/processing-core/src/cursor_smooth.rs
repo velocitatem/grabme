@@ -4,6 +4,7 @@
 //! Supports multiple algorithms selectable by the user.
 
 use grabme_project_model::event::InputEvent;
+use grabme_project_model::timeline::CursorConfig;
 use grabme_project_model::viewport::Point2D;
 
 /// Cursor smoothing engine.
@@ -14,8 +15,20 @@ pub struct CursorSmoother {
 /// Available smoothing algorithms.
 #[derive(Debug, Clone, Copy)]
 pub enum SmoothingAlgorithm {
-    /// Exponential Moving Average with configurable factor.
-    Ema { factor: f64 },
+    /// Exponential Moving Average with configurable strength.
+    ///
+    /// `strength` is in [0.0, 1.0], where larger values mean more smoothing.
+    Ema { strength: f64 },
+
+    /// Neighbor midpoint pull (preview-compatible "bezier" mode).
+    ///
+    /// `strength` is in [0.0, 1.0], where larger values mean more smoothing.
+    Bezier { strength: f64 },
+
+    /// 1D Kalman filter per axis (preview-compatible mode).
+    ///
+    /// `strength` is in [0.0, 1.0], where larger values mean more smoothing.
+    Kalman { strength: f64 },
 
     /// Moving average over a window of N samples.
     MovingAverage { window: usize },
@@ -30,9 +43,26 @@ impl CursorSmoother {
         Self { algorithm }
     }
 
-    /// Create a smoother with sensible defaults (EMA, factor=0.3).
+    /// Create a smoother with sensible defaults (EMA, strength=0.3).
     pub fn default_ema() -> Self {
-        Self::new(SmoothingAlgorithm::Ema { factor: 0.3 })
+        Self::new(SmoothingAlgorithm::Ema { strength: 0.3 })
+    }
+
+    /// Build a smoothing algorithm from timeline cursor config.
+    pub fn algorithm_from_cursor_config(config: &CursorConfig) -> SmoothingAlgorithm {
+        let strength = clamp01(config.smoothing_factor);
+        match config.smoothing {
+            grabme_project_model::timeline::SmoothingAlgorithm::Ema => {
+                SmoothingAlgorithm::Ema { strength }
+            }
+            grabme_project_model::timeline::SmoothingAlgorithm::Bezier => {
+                SmoothingAlgorithm::Bezier { strength }
+            }
+            grabme_project_model::timeline::SmoothingAlgorithm::Kalman => {
+                SmoothingAlgorithm::Kalman { strength }
+            }
+            grabme_project_model::timeline::SmoothingAlgorithm::None => SmoothingAlgorithm::None,
+        }
     }
 
     /// Smooth a sequence of pointer positions extracted from events.
@@ -45,7 +75,9 @@ impl CursorSmoother {
             .collect();
 
         match self.algorithm {
-            SmoothingAlgorithm::Ema { factor } => self.smooth_ema(&raw, factor),
+            SmoothingAlgorithm::Ema { strength } => self.smooth_ema(&raw, strength),
+            SmoothingAlgorithm::Bezier { strength } => self.smooth_bezier(&raw, strength),
+            SmoothingAlgorithm::Kalman { strength } => self.smooth_kalman(&raw, strength),
             SmoothingAlgorithm::MovingAverage { window } => {
                 self.smooth_moving_average(&raw, window)
             }
@@ -94,11 +126,15 @@ impl CursorSmoother {
         Some(Point2D::new(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t))
     }
 
-    /// EMA smoothing: `smoothed = prev + (current - prev) * factor`
-    fn smooth_ema(&self, raw: &[(u64, f64, f64)], factor: f64) -> Vec<(u64, f64, f64)> {
+    /// EMA smoothing using preview-compatible strength semantics.
+    ///
+    /// `alpha = 1 - strength`, then `smoothed = alpha * current + (1 - alpha) * previous`.
+    fn smooth_ema(&self, raw: &[(u64, f64, f64)], strength: f64) -> Vec<(u64, f64, f64)> {
         if raw.is_empty() {
             return vec![];
         }
+
+        let alpha = clamp01(1.0 - strength);
 
         let mut result = Vec::with_capacity(raw.len());
         let mut prev_x = raw[0].1;
@@ -106,9 +142,70 @@ impl CursorSmoother {
         result.push(raw[0]);
 
         for &(t, x, y) in &raw[1..] {
-            prev_x = prev_x + (x - prev_x) * factor;
-            prev_y = prev_y + (y - prev_y) * factor;
+            prev_x = alpha * x + (1.0 - alpha) * prev_x;
+            prev_y = alpha * y + (1.0 - alpha) * prev_y;
             result.push((t, prev_x, prev_y));
+        }
+
+        result
+    }
+
+    /// Neighbor midpoint pull smoothing compatible with preview "bezier" mode.
+    fn smooth_bezier(&self, raw: &[(u64, f64, f64)], strength: f64) -> Vec<(u64, f64, f64)> {
+        if raw.len() < 3 {
+            return raw.to_vec();
+        }
+
+        let pull = clamp01(strength);
+        let mut result = Vec::with_capacity(raw.len());
+        result.push(raw[0]);
+
+        for i in 1..raw.len() - 1 {
+            let prev = raw[i - 1];
+            let curr = raw[i];
+            let next = raw[i + 1];
+
+            let cx = (prev.1 + next.1) * 0.5;
+            let cy = (prev.2 + next.2) * 0.5;
+            let x = curr.1 * (1.0 - pull) + cx * pull;
+            let y = curr.2 * (1.0 - pull) + cy * pull;
+            result.push((curr.0, x, y));
+        }
+
+        result.push(*raw.last().unwrap());
+        result
+    }
+
+    /// Kalman smoothing compatible with preview "kalman" mode.
+    fn smooth_kalman(&self, raw: &[(u64, f64, f64)], strength: f64) -> Vec<(u64, f64, f64)> {
+        if raw.is_empty() {
+            return vec![];
+        }
+
+        let strength = clamp01(strength);
+        let q = 0.001 + (1.0 - strength) * 0.01;
+        let r = 0.001 + strength * 0.04;
+
+        let mut result = Vec::with_capacity(raw.len());
+        let mut x = raw[0].1;
+        let mut y = raw[0].2;
+        let mut px = 1.0;
+        let mut py = 1.0;
+
+        for &(t, sx, sy) in raw {
+            px += q;
+            py += q;
+
+            let kx = px / (px + r);
+            let ky = py / (py + r);
+
+            x = x + kx * (sx - x);
+            y = y + ky * (sy - y);
+
+            px = (1.0 - kx) * px;
+            py = (1.0 - ky) * py;
+
+            result.push((t, x, y));
         }
 
         result
@@ -176,6 +273,10 @@ pub fn generate_cursor_loop(
     }
 
     loop_path
+}
+
+fn clamp01(value: f64) -> f64 {
+    value.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -259,6 +360,30 @@ mod tests {
     fn test_moving_average() {
         let events = make_jittery_events();
         let smoother = CursorSmoother::new(SmoothingAlgorithm::MovingAverage { window: 3 });
+        let smoothed = smoother.smooth(&events);
+        assert_eq!(smoothed.len(), events.len());
+    }
+
+    #[test]
+    fn test_bezier_keeps_endpoints() {
+        let events = make_jittery_events();
+        let smoother = CursorSmoother::new(SmoothingAlgorithm::Bezier { strength: 0.7 });
+        let smoothed = smoother.smooth(&events);
+        assert_eq!(smoothed.len(), events.len());
+        assert_eq!(
+            smoothed.first().unwrap().1,
+            events[0].pointer_position().unwrap().0
+        );
+        assert_eq!(
+            smoothed.last().unwrap().1,
+            events.last().unwrap().pointer_position().unwrap().0
+        );
+    }
+
+    #[test]
+    fn test_kalman_returns_same_length() {
+        let events = make_jittery_events();
+        let smoother = CursorSmoother::new(SmoothingAlgorithm::Kalman { strength: 0.5 });
         let smoothed = smoother.smooth(&events);
         assert_eq!(smoothed.len(), events.len());
     }

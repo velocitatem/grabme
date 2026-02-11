@@ -6,9 +6,9 @@ use grabme_capture_engine::{
     AudioCaptureConfig, CaptureMode, CaptureSession, ScreenCaptureConfig, SessionConfig,
     SessionState,
 };
-use grabme_processing_core::auto_zoom::AutoZoomAnalyzer;
-use grabme_project_model::event::parse_events;
 use grabme_project_model::project::{AspectMode, ExportConfig, ExportFormat, LoadedProject};
+use grabme_project_model::timeline::{CameraKeyframe, EasingFunction, KeyframeSource};
+use grabme_project_model::viewport::Viewport;
 use grabme_render_engine::export::{export_project, ExportJob, ExportProgress};
 
 fn main() -> anyhow::Result<()> {
@@ -61,6 +61,7 @@ struct OverlayRecorderApp {
     project_name: String,
     output_dir: String,
     fps: u32,
+    monitor_index: usize,
     mic: bool,
     system_audio: bool,
     webcam: bool,
@@ -76,7 +77,8 @@ struct OverlayRecorderApp {
 
 impl Default for OverlayRecorderApp {
     fn default() -> Self {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .expect("tokio runtime should initialize");
@@ -88,6 +90,7 @@ impl Default for OverlayRecorderApp {
             project_name: "recording".to_string(),
             output_dir: ".".to_string(),
             fps: 60,
+            monitor_index: 0,
             mic: true,
             system_audio: true,
             webcam: false,
@@ -109,8 +112,10 @@ impl OverlayRecorderApp {
             name: self.project_name.trim().to_string(),
             output_dir: PathBuf::from(self.output_dir.trim()),
             screen: ScreenCaptureConfig {
-                mode: CaptureMode::FullScreen { monitor_index: 0 },
-                hide_cursor: true,
+                mode: CaptureMode::FullScreen {
+                    monitor_index: self.monitor_index,
+                },
+                hide_cursor: false,
             },
             audio: AudioCaptureConfig {
                 mic: self.mic,
@@ -359,6 +364,10 @@ impl eframe::App for OverlayRecorderApp {
                     ui.label("FPS");
                     ui.add(egui::Slider::new(&mut self.fps, 24..=120));
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Monitor");
+                    ui.add(egui::Slider::new(&mut self.monitor_index, 0..=7));
+                });
 
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.mic, "Mic");
@@ -429,23 +438,12 @@ fn auto_direct_project(project_path: &Path) -> anyhow::Result<usize> {
     let mut loaded = LoadedProject::load(project_path)
         .map_err(|e| anyhow::anyhow!("Failed to load project: {e}"))?;
 
-    let events_path = project_path.join("meta").join("events.jsonl");
-    let content = std::fs::read_to_string(&events_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read events {}: {e}", events_path.display()))?;
-    let jsonl = content
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.is_empty() && !trimmed.starts_with('#')
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let events = parse_events(&jsonl).map_err(|e| anyhow::anyhow!("Invalid events stream: {e}"))?;
-    let analyzer = AutoZoomAnalyzer::with_defaults();
-    let timeline = analyzer.analyze(&events);
-
-    loaded.timeline.keyframes = timeline.keyframes;
+    loaded.timeline.keyframes = vec![CameraKeyframe {
+        time_secs: 0.0,
+        viewport: Viewport::FULL,
+        easing: EasingFunction::EaseInOut,
+        source: KeyframeSource::Auto,
+    }];
     loaded
         .save()
         .map_err(|e| anyhow::anyhow!("Failed to save auto-directed timeline: {e}"))?;

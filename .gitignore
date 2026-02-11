@@ -42,3 +42,5 @@ logs/
 # Temporary files
 tmp/
 *.tmp
+
+./recording/

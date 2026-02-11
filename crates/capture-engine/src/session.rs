@@ -326,6 +326,12 @@ impl CaptureSession {
 
         // Update project with track references
         if let Some(ref mut project) = self.project {
+            project.project.recording.cursor_hidden = self.config.screen.hide_cursor;
+            project.project.recording.monitor_index = match self.config.screen.mode {
+                CaptureMode::FullScreen { monitor_index } => monitor_index,
+                _ => 0,
+            };
+
             project.project.tracks.screen = Some(TrackRef {
                 path: "sources/screen.mkv".to_string(),
                 duration_secs: elapsed,

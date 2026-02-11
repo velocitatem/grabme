@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use grabme_common::error::{GrabmeError, GrabmeResult};
-use grabme_processing_core::cursor_smooth::{CursorSmoother, SmoothingAlgorithm};
+use grabme_processing_core::cursor_smooth::CursorSmoother;
 use grabme_project_model::event::{parse_events, InputEvent};
 use grabme_project_model::project::{ExportConfig, ExportFormat, LoadedProject};
 
@@ -131,6 +131,8 @@ pub async fn export_project(
 struct LoadedExportInputs {
     project: LoadedProject,
     screen_path: PathBuf,
+    source_width: u32,
+    source_height: u32,
     webcam_path: Option<PathBuf>,
     mic_path: Option<PathBuf>,
     system_audio_path: Option<PathBuf>,
@@ -157,7 +159,14 @@ struct VerificationSummary {
 struct FfmpegBackend;
 
 const MAX_VIEWPORT_EXPR_POINTS: usize = 48;
-const MAX_CURSOR_EXPR_POINTS: usize = 24;
+#[allow(dead_code)]
+const MIN_CURSOR_EXPR_POINTS: usize = 64;
+#[allow(dead_code)]
+const MAX_CURSOR_EXPR_POINTS: usize = 900;
+#[allow(dead_code)]
+const CURSOR_EXPR_POINTS_PER_SEC: f64 = 2.5;
+#[allow(dead_code)]
+const CURSOR_SIMPLIFY_TOLERANCE_PX: f64 = 0.8;
 
 impl FfmpegBackend {
     fn new() -> Self {
@@ -179,6 +188,11 @@ impl FfmpegBackend {
         if !screen_path.exists() {
             return Err(GrabmeError::FileNotFound { path: screen_path });
         }
+
+        let (source_width, source_height) = probe_video_dimensions(&screen_path).unwrap_or((
+            project.project.recording.capture_width,
+            project.project.recording.capture_height,
+        ));
 
         let webcam_path = project
             .project
@@ -226,6 +240,8 @@ impl FfmpegBackend {
         Ok(LoadedExportInputs {
             project,
             screen_path,
+            source_width,
+            source_height,
             webcam_path,
             mic_path,
             system_audio_path,
@@ -242,28 +258,40 @@ impl FfmpegBackend {
             ));
         }
 
-        let smoothing = match inputs.project.timeline.cursor_config.smoothing {
-            grabme_project_model::timeline::SmoothingAlgorithm::Ema => SmoothingAlgorithm::Ema {
-                factor: inputs.project.timeline.cursor_config.smoothing_factor,
-            },
-            grabme_project_model::timeline::SmoothingAlgorithm::Bezier => {
-                SmoothingAlgorithm::MovingAverage { window: 5 }
-            }
-            grabme_project_model::timeline::SmoothingAlgorithm::Kalman => {
-                SmoothingAlgorithm::MovingAverage { window: 7 }
-            }
-            grabme_project_model::timeline::SmoothingAlgorithm::None => SmoothingAlgorithm::None,
-        };
+        let mut cursor_config = inputs.project.timeline.cursor_config.clone();
+        if let Some(effect_strength) =
+            inputs
+                .project
+                .timeline
+                .effects
+                .iter()
+                .rev()
+                .find_map(|effect| match effect {
+                    grabme_project_model::timeline::Effect::CursorSmooth { strength } => {
+                        Some(*strength)
+                    }
+                    _ => None,
+                })
+        {
+            cursor_config.smoothing_factor = effect_strength.clamp(0.0, 1.0);
+        }
+
+        let smoothing = CursorSmoother::algorithm_from_cursor_config(&cursor_config);
 
         let smoothed_cursor = CursorSmoother::new(smoothing).smooth(&inputs.events);
         let fps = job.config.fps.max(1);
         let total_frames = (inputs.duration_secs * fps as f64).ceil() as u64;
 
-        let viewport_points = sample_viewport_points(
-            &inputs.project.timeline,
-            inputs.duration_secs,
-            MAX_VIEWPORT_EXPR_POINTS,
-        );
+        let viewport_points = if let Some(focused_viewport) = derive_static_focus_viewport(inputs, &job.config)
+        {
+            vec![(0.0, focused_viewport), (inputs.duration_secs, focused_viewport)]
+        } else {
+            sample_viewport_points(
+                &inputs.project.timeline,
+                inputs.duration_secs,
+                MAX_VIEWPORT_EXPR_POINTS,
+            )
+        };
         let x_expr =
             build_piecewise_expr(viewport_points.iter().map(|(t, vp)| (*t, vp.x)).collect());
         let y_expr =
@@ -272,19 +300,6 @@ impl FfmpegBackend {
             build_piecewise_expr(viewport_points.iter().map(|(t, vp)| (*t, vp.w)).collect());
         let h_expr =
             build_piecewise_expr(viewport_points.iter().map(|(t, vp)| (*t, vp.h)).collect());
-
-        let cursor_points = sample_cursor_points(
-            &smoothed_cursor,
-            &inputs.project,
-            job.config.width,
-            job.config.height,
-            inputs.duration_secs,
-            MAX_CURSOR_EXPR_POINTS,
-        );
-        let cursor_x_expr =
-            build_piecewise_expr(cursor_points.iter().map(|(t, x, _)| (*t, *x)).collect());
-        let cursor_y_expr =
-            build_piecewise_expr(cursor_points.iter().map(|(t, _, y)| (*t, *y)).collect());
 
         let webcam_index = if inputs.webcam_path.is_some() {
             Some(1usize)
@@ -316,8 +331,6 @@ impl FfmpegBackend {
             &y_expr,
             &w_expr,
             &h_expr,
-            &cursor_x_expr,
-            &cursor_y_expr,
             webcam_index,
         );
         let filter_len = filter.len();
@@ -374,18 +387,18 @@ impl FfmpegBackend {
         args.push(job.output_path.display().to_string());
 
         let debug_report = format!(
-            "duration_secs={:.3}\nframes={}\nviewport_keyframes={}\nviewport_points={}\ncursor_samples={}\nexpr_len_x={}\nexpr_len_y={}\nexpr_len_w={}\nexpr_len_h={}\nexpr_len_cursor_x={}\nexpr_len_cursor_y={}\nfilter_len={}\nffmpeg_args={}\nplan_build_ms={}\n",
+            "duration_secs={:.3}\nframes={}\nviewport_keyframes={}\nviewport_points={}\nsource_width={}\nsource_height={}\nsmoothed_cursor_points={}\nexpr_len_x={}\nexpr_len_y={}\nexpr_len_w={}\nexpr_len_h={}\nfilter_len={}\nffmpeg_args={}\nplan_build_ms={}\n",
             inputs.duration_secs,
             total_frames,
             inputs.project.timeline.keyframes.len(),
             viewport_points.len(),
-            cursor_points.len(),
+            inputs.source_width,
+            inputs.source_height,
+            smoothed_cursor.len(),
             x_expr.len(),
             y_expr.len(),
             w_expr.len(),
             h_expr.len(),
-            cursor_x_expr.len(),
-            cursor_y_expr.len(),
             filter_len,
             args.join(" "),
             plan_started.elapsed().as_millis(),
@@ -396,7 +409,7 @@ impl FfmpegBackend {
             frames = total_frames,
             viewport_keyframes = inputs.project.timeline.keyframes.len(),
             viewport_points = viewport_points.len(),
-            cursor_points = cursor_points.len(),
+            smoothed_cursor_points = smoothed_cursor.len(),
             filter_len,
             "Export plan built"
         );
@@ -614,7 +627,10 @@ impl RenderBackend for FfmpegBackend {
                 "Visual verification found cursor coordinates outside output bounds"
             );
         }
-        tracing::info!(elapsed_secs = started.elapsed().as_secs_f64(), "Export finished");
+        tracing::info!(
+            elapsed_secs = started.elapsed().as_secs_f64(),
+            "Export finished"
+        );
         Ok(())
     }
 
@@ -660,38 +676,242 @@ fn sample_viewport_points(
     downsample_timed_points(points, max_points.max(2))
 }
 
+fn derive_static_focus_viewport(
+    inputs: &LoadedExportInputs,
+    config: &ExportConfig,
+) -> Option<grabme_project_model::viewport::Viewport> {
+    if inputs.project.timeline.keyframes.len() != 1
+        || inputs.project.timeline.keyframes[0].viewport
+            != grabme_project_model::viewport::Viewport::FULL
+    {
+        return None;
+    }
+
+    let source_w = inputs.source_width.max(1) as f64;
+    let source_h = inputs.source_height.max(1) as f64;
+    let source_aspect = source_w / source_h;
+    let target_aspect = config.width.max(1) as f64 / config.height.max(1) as f64;
+
+    if source_aspect <= target_aspect * 1.05 {
+        return None;
+    }
+
+    let focus_x = latest_pointer_axis(&inputs.events, true)
+        .or_else(|| median_pointer_axis(&inputs.events, true))
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    let focus_y = latest_pointer_axis(&inputs.events, false)
+        .or_else(|| median_pointer_axis(&inputs.events, false))
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+
+    let estimated_monitor_width = config.width.max(1) as f64;
+    let estimated_count = (source_w / estimated_monitor_width).round() as usize;
+    let monitor_count = estimated_count.clamp(1, 8);
+
+    let slot_w = 1.0 / monitor_count as f64;
+    let configured_monitor_index = inputs.project.project.recording.monitor_index;
+    let monitor_index = if configured_monitor_index < monitor_count {
+        configured_monitor_index
+    } else {
+        select_focus_monitor_index(&inputs.events, monitor_count, focus_x)
+    };
+    let slot_x = monitor_index as f64 * slot_w;
+
+    let slot_aspect = source_aspect * slot_w;
+
+    if slot_aspect > target_aspect {
+        let w = (target_aspect / source_aspect).clamp(0.01, slot_w);
+        let local_x = ((focus_x - slot_x) / slot_w).clamp(0.0, 1.0);
+        let x = (slot_x + (slot_w - w) * local_x).clamp(slot_x, slot_x + slot_w - w);
+        Some(grabme_project_model::viewport::Viewport::new(x, 0.0, w, 1.0))
+    } else {
+        let h = (slot_aspect / target_aspect).clamp(0.01, 1.0);
+        let y = ((1.0 - h) * focus_y).clamp(0.0, 1.0 - h);
+        Some(grabme_project_model::viewport::Viewport::new(slot_x, y, slot_w, h))
+    }
+}
+
+fn median_pointer_axis(events: &[InputEvent], x_axis: bool) -> Option<f64> {
+    let mut values: Vec<f64> = events
+        .iter()
+        .filter_map(|event| event.pointer_position())
+        .map(|(x, y)| if x_axis { x } else { y })
+        .collect();
+
+    if values.is_empty() {
+        return None;
+    }
+
+    values.sort_by(f64::total_cmp);
+    Some(values[values.len() / 2])
+}
+
+fn latest_pointer_axis(events: &[InputEvent], x_axis: bool) -> Option<f64> {
+    events
+        .iter()
+        .rev()
+        .filter_map(|event| event.pointer_position())
+        .map(|(x, y)| if x_axis { x } else { y })
+        .next()
+}
+
+fn select_focus_monitor_index(events: &[InputEvent], monitor_count: usize, fallback_x: f64) -> usize {
+    if monitor_count <= 1 {
+        return 0;
+    }
+
+    let mut votes = vec![0usize; monitor_count];
+    let recent_positions: Vec<f64> = events
+        .iter()
+        .rev()
+        .filter_map(|event| event.pointer_position().map(|(x, _)| x.clamp(0.0, 1.0)))
+        .take(180)
+        .collect();
+
+    for x in recent_positions {
+        let idx = ((x * monitor_count as f64).floor() as usize).min(monitor_count - 1);
+        votes[idx] += 1;
+    }
+
+    if let Some((idx, count)) = votes
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, count)| *count)
+        .map(|(idx, count)| (idx, *count))
+    {
+        if count > 0 {
+            return idx;
+        }
+    }
+
+    ((fallback_x * monitor_count as f64).floor() as usize).min(monitor_count - 1)
+}
+
+#[allow(dead_code)]
 fn sample_cursor_points(
     smoothed_cursor: &[(u64, f64, f64)],
     project: &LoadedProject,
     out_w: u32,
     out_h: u32,
     duration_secs: f64,
-    max_points: usize,
+    fps: u32,
 ) -> Vec<(f64, f64, f64)> {
     if smoothed_cursor.is_empty() {
         return vec![(0.0, out_w as f64 / 2.0, out_h as f64 / 2.0)];
     }
 
-    let sample_count = smoothed_cursor.len().min(max_points.max(2));
-    let stride = ((smoothed_cursor.len() as f64) / (sample_count as f64)).ceil() as usize;
-
-    let mut points = Vec::with_capacity(sample_count + 1);
-    for (idx, &(ts, x, y)) in smoothed_cursor.iter().enumerate() {
-        if idx % stride != 0 && idx + 1 != smoothed_cursor.len() {
-            continue;
-        }
+    let mut points = Vec::with_capacity(smoothed_cursor.len() + 1);
+    for &(ts, x, y) in smoothed_cursor {
         let t_secs = (ts as f64 / 1_000_000_000.0).clamp(0.0, duration_secs);
         let viewport = project.timeline.viewport_at(t_secs);
         let (px, py) = project_to_output_coords(x, y, viewport, out_w, out_h);
         points.push((t_secs, px, py));
     }
 
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    points.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
+
     if points.last().map(|(t, _, _)| *t).unwrap_or(0.0) < duration_secs {
         let last = *points.last().unwrap();
         points.push((duration_secs, last.1, last.2));
     }
 
-    points
+    let point_budget = derive_cursor_expr_point_budget(duration_secs, fps).min(points.len());
+    if points.len() <= point_budget {
+        return points;
+    }
+
+    simplify_cursor_points(points, point_budget, CURSOR_SIMPLIFY_TOLERANCE_PX)
+}
+
+#[allow(dead_code)]
+fn derive_cursor_expr_point_budget(duration_secs: f64, fps: u32) -> usize {
+    let fps = fps.max(1) as usize;
+    let expected = (duration_secs.max(1.0) * CURSOR_EXPR_POINTS_PER_SEC).round() as usize;
+    let floor = MIN_CURSOR_EXPR_POINTS.max(fps * 2);
+    let cap = MAX_CURSOR_EXPR_POINTS.min((duration_secs.max(1.0) * fps as f64).round() as usize);
+    expected.max(floor).min(cap).max(2)
+}
+
+#[allow(dead_code)]
+fn simplify_cursor_points(
+    points: Vec<(f64, f64, f64)>,
+    max_points: usize,
+    tolerance_px: f64,
+) -> Vec<(f64, f64, f64)> {
+    if points.len() <= max_points {
+        return points;
+    }
+
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+
+    let mut stack = vec![(0usize, points.len() - 1usize)];
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+
+        let mut max_dist = 0.0;
+        let mut max_idx = None;
+        for idx in (start + 1)..end {
+            let dist = point_line_distance_px(points[idx], points[start], points[end]);
+            if dist > max_dist {
+                max_dist = dist;
+                max_idx = Some(idx);
+            }
+        }
+
+        if max_dist > tolerance_px {
+            if let Some(idx) = max_idx {
+                keep[idx] = true;
+                stack.push((start, idx));
+                stack.push((idx, end));
+            }
+        }
+    }
+
+    let mut simplified: Vec<(f64, f64, f64)> = points
+        .iter()
+        .zip(keep.iter())
+        .filter_map(|(p, &k)| if k { Some(*p) } else { None })
+        .collect();
+
+    if simplified.len() > max_points {
+        let reduced: Vec<(f64, (f64, f64))> =
+            simplified.iter().map(|(t, x, y)| (*t, (*x, *y))).collect();
+        return downsample_timed_points(reduced, max_points)
+            .into_iter()
+            .map(|(t, (x, y))| (t, x, y))
+            .collect();
+    }
+
+    if simplified.first().map(|(t, _, _)| *t).unwrap_or(0.0) > 0.0 {
+        simplified.insert(0, points[0]);
+    }
+
+    simplified
+}
+
+#[allow(dead_code)]
+fn point_line_distance_px(point: (f64, f64, f64), a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
+    let (px, py) = (point.1, point.2);
+    let (ax, ay) = (a.1, a.2);
+    let (bx, by) = (b.1, b.2);
+
+    let dx = bx - ax;
+    let dy = by - ay;
+    if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
+        return ((px - ax).powi(2) + (py - ay).powi(2)).sqrt();
+    }
+
+    let t = (((px - ax) * dx) + ((py - ay) * dy)) / (dx * dx + dy * dy);
+    let t = t.clamp(0.0, 1.0);
+    let proj_x = ax + t * dx;
+    let proj_y = ay + t * dy;
+    ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
 }
 
 fn downsample_timed_points<T: Clone>(points: Vec<(f64, T)>, max_points: usize) -> Vec<(f64, T)> {
@@ -709,6 +929,7 @@ fn downsample_timed_points<T: Clone>(points: Vec<(f64, T)>, max_points: usize) -
     selected
 }
 
+#[allow(dead_code)]
 fn project_to_output_coords(
     x: f64,
     y: f64,
@@ -758,8 +979,6 @@ fn build_filter_graph(
     y_expr: &str,
     w_expr: &str,
     h_expr: &str,
-    cursor_x_expr: &str,
-    cursor_y_expr: &str,
     webcam_index: Option<usize>,
 ) -> String {
     let mut graph = String::new();
@@ -774,12 +993,6 @@ fn build_filter_graph(
         out_h = config.height,
     ));
 
-    graph.push_str(&format!(
-        ";[base]drawbox=x='({cx})-9':y='({cy})-9':w=18:h=18:color=black@0.75:t=fill,drawbox=x='({cx})-7':y='({cy})-7':w=14:h=14:color=white@0.95:t=fill[cursor]",
-        cx = cursor_x_expr,
-        cy = cursor_y_expr,
-    ));
-
     if let Some(webcam_idx) = webcam_index {
         let webcam_w = (config.width as f64 * 0.24).round() as u32;
         let webcam_h = (config.height as f64 * 0.24).round() as u32;
@@ -787,7 +1000,7 @@ fn build_filter_graph(
         let margin_y = (config.height as f64 * 0.03).round() as u32;
 
         graph.push_str(&format!(
-            ";[{webcam}:v]scale={webcam_w}:{webcam_h}:flags=lanczos,format=yuva420p,colorchannelmixer=aa=0.92[webcam];[cursor][webcam]overlay=x=W-w-{mx}:y=H-h-{my}[vout]",
+            ";[{webcam}:v]scale={webcam_w}:{webcam_h}:flags=lanczos,format=yuva420p,colorchannelmixer=aa=0.92[webcam];[base][webcam]overlay=x=W-w-{mx}:y=H-h-{my}[vout]",
             webcam = webcam_idx,
             webcam_w = webcam_w.max(2),
             webcam_h = webcam_h.max(2),
@@ -795,7 +1008,7 @@ fn build_filter_graph(
             my = margin_y,
         ));
     } else {
-        graph.push_str(";[cursor]null[vout]");
+        graph.push_str(";[base]null[vout]");
     }
 
     graph
@@ -864,6 +1077,37 @@ fn command_exists(binary: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn probe_video_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let line = raw.lines().next()?.trim();
+    let (w, h) = line.split_once('x')?;
+    let width = w.parse::<u32>().ok()?;
+    let height = h.parse::<u32>().ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((width, height))
 }
 
 #[derive(Debug, Default)]
@@ -954,5 +1198,30 @@ mod tests {
     fn test_piecewise_expr_single_point() {
         let expr = build_piecewise_expr(vec![(0.0, 0.42)]);
         assert_eq!(expr, "0.420000");
+    }
+
+    #[test]
+    fn test_cursor_expr_budget_scales_with_duration() {
+        let short = derive_cursor_expr_point_budget(4.0, 60);
+        let long = derive_cursor_expr_point_budget(120.0, 60);
+        assert!(long > short);
+        assert!(short >= MIN_CURSOR_EXPR_POINTS);
+        assert!(long <= MAX_CURSOR_EXPR_POINTS);
+    }
+
+    #[test]
+    fn test_simplify_cursor_points_preserves_endpoints() {
+        let mut points = Vec::new();
+        for i in 0..100 {
+            let t = i as f64 * 0.1;
+            let x = i as f64;
+            let y = (i as f64 * 0.2).sin() * 20.0;
+            points.push((t, x, y));
+        }
+
+        let simplified = simplify_cursor_points(points.clone(), 20, 0.5);
+        assert!(simplified.len() <= 20);
+        assert_eq!(simplified.first().unwrap(), points.first().unwrap());
+        assert_eq!(simplified.last().unwrap(), points.last().unwrap());
     }
 }

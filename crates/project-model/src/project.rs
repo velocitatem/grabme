@@ -56,6 +56,10 @@ pub struct RecordingConfig {
     /// Whether the system cursor was hidden during capture.
     pub cursor_hidden: bool,
 
+    /// Selected monitor index when recording full screen.
+    #[serde(default)]
+    pub monitor_index: usize,
+
     /// Audio sample rate.
     pub audio_sample_rate: u32,
 }
@@ -199,6 +203,7 @@ impl Project {
                 scale_factor: 1.0,
                 display_server: DisplayServer::Wayland,
                 cursor_hidden: true,
+                monitor_index: 0,
                 audio_sample_rate: 48000,
             },
             tracks: Tracks {

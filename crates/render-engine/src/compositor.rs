@@ -3,6 +3,7 @@
 //! This module defines the composition operations that will be
 //! applied frame-by-frame during export rendering.
 
+use grabme_processing_core::cursor_smooth::CursorSmoother;
 use grabme_project_model::timeline::Timeline;
 use grabme_project_model::viewport::Viewport;
 
@@ -78,8 +79,10 @@ pub fn compute_compositions(
 
         // Get cursor position
         let cursor = if !smoothed_cursor.is_empty() {
-            let cursor_pos = find_closest_cursor(smoothed_cursor, time_ns);
-            cursor_pos.map(|(cx, cy)| {
+            let cursor_pos = CursorSmoother::position_at(smoothed_cursor, time_ns);
+            cursor_pos.map(|pos| {
+                let cx = pos.x;
+                let cy = pos.y;
                 // Transform cursor from capture coords to output coords
                 let local = viewport.to_local(cx, cy);
                 match local {
@@ -114,15 +117,20 @@ pub fn compute_compositions(
     compositions
 }
 
-/// Find the closest cursor position to a given timestamp.
-fn find_closest_cursor(data: &[(u64, f64, f64)], target_ns: u64) -> Option<(f64, f64)> {
-    if data.is_empty() {
-        return None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cursor_uses_interpolated_position() {
+        let timeline = Timeline::new();
+        let cursor = vec![(0u64, 0.0, 0.0), (1_000_000_000u64, 1.0, 1.0)];
+
+        let frames = compute_compositions(&timeline, &cursor, 100, 100, 2, 1.0);
+        assert_eq!(frames.len(), 2);
+
+        let mid = frames[1].cursor.as_ref().unwrap();
+        assert!((mid.x - 50.0).abs() < 0.001);
+        assert!((mid.y - 50.0).abs() < 0.001);
     }
-
-    let idx = data
-        .binary_search_by_key(&target_ns, |(t, _, _)| *t)
-        .unwrap_or_else(|i| i.min(data.len() - 1));
-
-    Some((data[idx].1, data[idx].2))
 }

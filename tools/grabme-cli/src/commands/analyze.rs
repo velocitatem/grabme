@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use grabme_processing_core::auto_zoom::{AutoZoomAnalyzer, AutoZoomConfig};
-use grabme_processing_core::cursor_smooth::{CursorSmoother, SmoothingAlgorithm};
+use grabme_processing_core::cursor_smooth::CursorSmoother;
 use grabme_project_model::event::parse_events;
 use grabme_project_model::LoadedProject;
 
@@ -48,7 +48,25 @@ pub fn run(
     }
 
     // Run cursor smoothing
-    let smoother = CursorSmoother::new(SmoothingAlgorithm::Ema { factor: 0.3 });
+    let mut cursor_config = project.timeline.cursor_config.clone();
+    if let Some(effect_strength) =
+        project
+            .timeline
+            .effects
+            .iter()
+            .rev()
+            .find_map(|effect| match effect {
+                grabme_project_model::timeline::Effect::CursorSmooth { strength } => {
+                    Some(*strength)
+                }
+                _ => None,
+            })
+    {
+        cursor_config.smoothing_factor = effect_strength.clamp(0.0, 1.0);
+    }
+
+    let smoothing = CursorSmoother::algorithm_from_cursor_config(&cursor_config);
+    let smoother = CursorSmoother::new(smoothing);
     let smoothed = smoother.smooth(&events);
     println!("  Smoothed {} pointer positions", smoothed.len());
 
