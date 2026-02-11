@@ -223,6 +223,8 @@ fn project_events_to_capture_space(
     events_header: Option<&EventStreamHeader>,
     recording: &RecordingConfig,
 ) -> (Vec<InputEvent>, AnalysisPointerModel) {
+    const EXPLICIT_PROJECTION_FALLBACK_DELTA: f64 = 0.35;
+
     if events.is_empty() {
         return (Vec::new(), AnalysisPointerModel::CaptureNormalized);
     }
@@ -239,13 +241,22 @@ fn project_events_to_capture_space(
             }
         });
 
+    let best_fit = select_best_projection_candidate(events, recording);
+
     let selected = if let Some(space) = explicit_space {
-        projection_candidate_for_space(space, recording).unwrap_or(ProjectionCandidate {
-            model: AnalysisPointerModel::CaptureNormalized,
-            transform: PointerTransform::identity(),
-        })
+        if let Some(explicit) = projection_candidate_for_space(space, recording) {
+            let explicit_score = score_projection_candidate(explicit, events);
+            let best_fit_score = score_projection_candidate(best_fit, events);
+            if best_fit_score > explicit_score + EXPLICIT_PROJECTION_FALLBACK_DELTA {
+                best_fit
+            } else {
+                explicit
+            }
+        } else {
+            best_fit
+        }
     } else {
-        select_best_projection_candidate(events, recording)
+        best_fit
     };
 
     let projected_events = events
@@ -537,5 +548,31 @@ mod tests {
         let (_mapped, model) =
             project_events_to_capture_space(&events, Some(&header), &project.recording);
         assert_eq!(model, AnalysisPointerModel::VirtualDesktopRootOrigin);
+    }
+
+    #[test]
+    fn test_project_events_to_capture_space_falls_back_when_explicit_mapping_is_inconsistent() {
+        let mut project = Project::new("test", 1920, 1080, 60);
+        project.recording.monitor_x = 0;
+        project.recording.monitor_y = 0;
+        project.recording.monitor_width = 1920;
+        project.recording.monitor_height = 1080;
+        project.recording.virtual_x = 0;
+        project.recording.virtual_y = 0;
+        project.recording.virtual_width = 4480;
+        project.recording.virtual_height = 1440;
+        project.recording.pointer_coordinate_space =
+            PointerCoordinateSpace::VirtualDesktopNormalized;
+
+        // These coordinates resemble a stream normalized against a narrower width,
+        // where forcing virtual_desktop projection would push many points out of bounds.
+        let events = vec![
+            InputEvent::pointer(0, 0.38, 0.45),
+            InputEvent::pointer(16_000_000, 0.44, 0.47),
+            InputEvent::pointer(32_000_000, 0.52, 0.50),
+        ];
+
+        let (_mapped, model) = project_events_to_capture_space(&events, None, &project.recording);
+        assert_eq!(model, AnalysisPointerModel::CaptureNormalized);
     }
 }

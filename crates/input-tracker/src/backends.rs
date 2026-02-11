@@ -207,6 +207,73 @@ impl InputBackend for StubBackend {
     }
 }
 
+pub struct X11PollingBackend {
+    x: f64,
+    y: f64,
+    origin_x: f64,
+    origin_y: f64,
+    width: f64,
+    height: f64,
+    last_poll: Instant,
+}
+
+impl X11PollingBackend {
+    pub fn new() -> GrabmeResult<Self> {
+        let (origin_x, origin_y, width, height) = desktop_geometry();
+        let (x, y) = initial_pointer_position(origin_x, origin_y, width, height);
+
+        Ok(Self {
+            x,
+            y,
+            origin_x,
+            origin_y,
+            width,
+            height,
+            last_poll: Instant::now(),
+        })
+    }
+
+    pub fn is_supported() -> bool {
+        // simplistic check: can we run xdotool?
+        Command::new("xdotool").arg("--version").output().is_ok()
+    }
+}
+
+impl InputBackend for X11PollingBackend {
+    fn poll(&mut self) -> GrabmeResult<Option<InputEvent>> {
+        if self.last_poll.elapsed() < Duration::from_millis(16) {
+            // ~60Hz
+            return Ok(None);
+        }
+
+        self.last_poll = Instant::now();
+
+        if let Some((rx, ry)) =
+            query_pointer_position(self.origin_x, self.origin_y, self.width, self.height)
+        {
+            // Only emit if changed
+            if (rx - self.x).abs() > f64::EPSILON || (ry - self.y).abs() > f64::EPSILON {
+                self.x = rx;
+                self.y = ry;
+                return Ok(Some(InputEvent::pointer(0, self.x, self.y)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn name(&self) -> &str {
+        "x11-polling"
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn pointer_coordinate_space(&self) -> PointerCoordinateSpace {
+        PointerCoordinateSpace::VirtualDesktopNormalized
+    }
+}
+
 // Phase 1 will add:
 // - EvdevBackend: reads from /dev/input/event* (requires input group)
 // - X11Backend: uses XInput2 for X11 sessions
@@ -214,6 +281,35 @@ impl InputBackend for StubBackend {
 
 /// Detect the best available input backend for the current system.
 pub fn detect_best_backend() -> Box<dyn InputBackend> {
+    // Allow forcing a backend for testing (e.g. X11 polling in Xvfb)
+    if let Ok(forced) = std::env::var("GRABME_FORCE_INPUT_BACKEND") {
+        match forced.as_str() {
+            "x11" | "x11-polling" => {
+                if X11PollingBackend::is_supported() {
+                    if let Ok(backend) = X11PollingBackend::new() {
+                        tracing::info!("Using forced X11 polling backend");
+                        return Box::new(backend);
+                    }
+                }
+            }
+            "evdev" => {
+                if EvdevBackend::is_supported() {
+                    if let Ok(backend) = EvdevBackend::new() {
+                        tracing::info!("Using forced evdev backend");
+                        return Box::new(backend);
+                    }
+                }
+            }
+            "stub" => {
+                tracing::info!("Using forced stub backend");
+                return Box::new(StubBackend::empty());
+            }
+            _ => {
+                tracing::warn!("Unknown backend forced: {}", forced);
+            }
+        }
+    }
+
     if EvdevBackend::is_supported() {
         match EvdevBackend::new() {
             Ok(backend) => {
@@ -221,7 +317,19 @@ pub fn detect_best_backend() -> Box<dyn InputBackend> {
                 return Box::new(backend);
             }
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to initialize evdev backend, using stub");
+                tracing::warn!(error = %e, "Failed to initialize evdev backend");
+            }
+        }
+    }
+
+    if X11PollingBackend::is_supported() {
+        match X11PollingBackend::new() {
+            Ok(backend) => {
+                tracing::info!("Using X11 polling backend");
+                return Box::new(backend);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to initialize X11 polling backend");
             }
         }
     }
@@ -266,7 +374,24 @@ fn desktop_geometry() -> (f64, f64, f64, f64) {
                 height.max(1.0),
             )
         }
-        _ => (0.0, 0.0, 1920.0, 1080.0),
+        _ => {
+            // Fallback for constrained environments (e.g. Xvfb) where monitor detection may fail.
+            // Keep this as a fallback only so normal sessions stay aligned with capture metadata,
+            // which is derived from monitor detection.
+            if let Ok(output) = Command::new("xdotool").arg("getdisplaygeometry").output() {
+                if output.status.success() {
+                    let s = String::from_utf8_lossy(&output.stdout);
+                    let parts: Vec<&str> = s.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        if let (Ok(w), Ok(h)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                            return (0.0, 0.0, w.max(1.0), h.max(1.0));
+                        }
+                    }
+                }
+            }
+
+            (0.0, 0.0, 1920.0, 1080.0)
+        }
     }
 }
 

@@ -904,6 +904,8 @@ fn select_cursor_projection(
     recording: &grabme_project_model::project::RecordingConfig,
     smoothed_cursor: &[(u64, f64, f64)],
 ) -> CursorProjection {
+    const EXPLICIT_PROJECTION_FALLBACK_DELTA: f64 = 0.35;
+
     let explicit_space = events_header
         .map(|header| header.pointer_coordinate_space)
         .filter(|space| *space != PointerCoordinateSpace::LegacyUnspecified)
@@ -916,17 +918,31 @@ fn select_cursor_projection(
             }
         });
 
+    let auto_projection = CursorProjection::from_recording_geometry(recording, smoothed_cursor);
+
     if let Some(space) = explicit_space {
         if let Some(candidate) = projection_candidate_for_space(space, recording) {
+            let explicit_score = score_projection_candidate(candidate, smoothed_cursor);
+            if auto_projection.score > explicit_score + EXPLICIT_PROJECTION_FALLBACK_DELTA {
+                tracing::warn!(
+                    explicit_model = candidate.model.as_str(),
+                    explicit_score,
+                    fallback_model = auto_projection.model.as_str(),
+                    fallback_score = auto_projection.score,
+                    "Explicit cursor projection appears inconsistent with sampled points; using best-fit projection"
+                );
+                return auto_projection;
+            }
+
             return CursorProjection {
                 model: candidate.model,
                 transform: candidate.transform,
-                score: 1.0,
+                score: explicit_score,
             };
         }
     }
 
-    CursorProjection::from_recording_geometry(recording, smoothed_cursor)
+    auto_projection
 }
 
 fn projection_candidate_for_space(
@@ -2869,6 +2885,31 @@ mod tests {
             pointer_coordinate_space: PointerCoordinateSpace::CaptureNormalized,
         };
         let smoothed = vec![(0u64, 0.2, 0.3), (16_000_000u64, 0.3, 0.35)];
+
+        let projection =
+            select_cursor_projection(Some(&header), &project.project.recording, &smoothed);
+        assert_eq!(projection.model, CursorCoordinateModel::CaptureNormalized);
+    }
+
+    #[test]
+    fn test_select_cursor_projection_falls_back_when_explicit_virtual_is_inconsistent() {
+        let project = mock_project_with_geometry(0, 0, 1920, 1080, 0, 0, 4480, 1440);
+        let header = EventStreamHeader {
+            schema_version: "1.0".to_string(),
+            epoch_monotonic_ns: 0,
+            epoch_wall: "2026-01-01T00:00:00Z".to_string(),
+            capture_width: 1920,
+            capture_height: 1080,
+            scale_factor: 1.0,
+            pointer_sample_rate_hz: 60,
+            pointer_coordinate_space: PointerCoordinateSpace::VirtualDesktopNormalized,
+        };
+
+        let smoothed = vec![
+            (0u64, 0.38, 0.45),
+            (16_000_000u64, 0.44, 0.47),
+            (32_000_000u64, 0.52, 0.50),
+        ];
 
         let projection =
             select_cursor_projection(Some(&header), &project.project.recording, &smoothed);

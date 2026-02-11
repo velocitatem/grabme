@@ -13,7 +13,7 @@ members = [
     "crates/render-engine",
     "crates/audio-ai",
     "tools/grabme-cli",
-    "apps/overlay-ui",
+    "apps/overlay-ui", "tools/e2e-cursor-drift",
 ]
 
 [workspace.package]

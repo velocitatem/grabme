@@ -44,3 +44,4 @@ tmp/
 *.tmp
 
 ./recording/
+drift_test_output/
