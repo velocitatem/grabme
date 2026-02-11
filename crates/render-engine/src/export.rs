@@ -296,7 +296,10 @@ impl FfmpegBackend {
         let total_frames = (inputs.duration_secs * fps as f64).ceil() as u64;
 
         let viewport_points = if FORCE_FULL_SCREEN_RENDER {
-            vec![(0.0, Viewport::FULL), (inputs.duration_secs, Viewport::FULL)]
+            vec![
+                (0.0, Viewport::FULL),
+                (inputs.duration_secs, Viewport::FULL),
+            ]
         } else {
             sample_viewport_points(
                 &inputs.project.timeline,
@@ -594,8 +597,15 @@ impl FfmpegBackend {
         inputs: &LoadedExportInputs,
         plan: &ExportPlan,
     ) -> GrabmeResult<VerificationSummary> {
+        let full_screen_timeline = grabme_project_model::timeline::Timeline::new();
+        let timeline = if FORCE_FULL_SCREEN_RENDER {
+            &full_screen_timeline
+        } else {
+            &inputs.project.timeline
+        };
+
         let compositions = compute_compositions(
-            &inputs.project.timeline,
+            timeline,
             &plan.smoothed_cursor,
             job.config.width,
             job.config.height,
@@ -857,6 +867,61 @@ fn select_focus_monitor_index(
     }
 
     ((fallback_x * monitor_count as f64).floor() as usize).min(monitor_count - 1)
+}
+
+#[allow(dead_code)]
+fn sample_cursor_points_full_screen(
+    smoothed_cursor: &[(u64, f64, f64)],
+    out_w: u32,
+    out_h: u32,
+    duration_secs: f64,
+    fps: u32,
+) -> Vec<(f64, f64, f64)> {
+    if smoothed_cursor.is_empty() {
+        return vec![
+            (0.0, out_w as f64 / 2.0, out_h as f64 / 2.0),
+            (duration_secs, out_w as f64 / 2.0, out_h as f64 / 2.0),
+        ];
+    }
+
+    let total_frames = (duration_secs * fps as f64).ceil() as u64;
+    let mut points = Vec::with_capacity(total_frames as usize + 1);
+    for frame in 0..total_frames {
+        let t_secs = frame as f64 / fps.max(1) as f64;
+        let t_ns = (t_secs * 1_000_000_000.0).round() as u64;
+        let Some(pos) = CursorSmoother::position_at(smoothed_cursor, t_ns) else {
+            continue;
+        };
+        points.push((
+            t_secs,
+            pos.x.clamp(0.0, 1.0) * out_w as f64,
+            pos.y.clamp(0.0, 1.0) * out_h as f64,
+        ));
+    }
+
+    let end_ns = (duration_secs * 1_000_000_000.0).round() as u64;
+    if let Some(end_pos) = CursorSmoother::position_at(smoothed_cursor, end_ns) {
+        points.push((
+            duration_secs,
+            end_pos.x.clamp(0.0, 1.0) * out_w as f64,
+            end_pos.y.clamp(0.0, 1.0) * out_h as f64,
+        ));
+    }
+
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    points.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
+
+    if points.last().map(|(t, _, _)| *t).unwrap_or(0.0) < duration_secs {
+        let last = *points.last().unwrap();
+        points.push((duration_secs, last.1, last.2));
+    }
+
+    let point_budget = derive_cursor_expr_point_budget(duration_secs, fps).min(points.len());
+    if points.len() <= point_budget {
+        return points;
+    }
+
+    simplify_cursor_points(points, point_budget, CURSOR_SIMPLIFY_TOLERANCE_PX)
 }
 
 #[allow(dead_code)]
