@@ -1406,16 +1406,17 @@ fn build_filter_graph(
     webcam_index: Option<usize>,
 ) -> String {
     let mut graph = String::new();
+    let cursor_sprite = build_mouse_cursor_sprite_filter(config.fps.max(1));
 
     graph.push_str(&format!(
-        "[0:v]crop=w='iw*({w})':h='ih*({h})':x='iw*({x})':y='ih*({y})',scale={out_w}:{out_h}:flags=lanczos,format=yuv420p[base];color=c=black@0.0:s=24x24:r={fps},format=rgba,drawbox=x=11:y=0:w=2:h=24:color=black@1.0:t=fill:replace=1,drawbox=x=0:y=11:w=24:h=2:color=black@1.0:t=fill:replace=1,drawbox=x=12:y=2:w=1:h=20:color=yellow@1.0:t=fill:replace=1,drawbox=x=2:y=12:w=20:h=1:color=yellow@1.0:t=fill:replace=1[cursor_sprite];[base][cursor_sprite]overlay=x='({cx})-12':y='({cy})-12':eval=frame[scene]",
+        "[0:v]crop=w='iw*({w})':h='ih*({h})':x='iw*({x})':y='ih*({y})',scale={out_w}:{out_h}:flags=lanczos,format=yuv420p[base];{cursor}[cursor_sprite];[base][cursor_sprite]overlay=x='({cx})-1':y='({cy})-1':eval=frame[scene]",
         w = w_expr,
         h = h_expr,
         x = x_expr,
         y = y_expr,
         cx = cursor_x_expr,
         cy = cursor_y_expr,
-        fps = config.fps.max(1),
+        cursor = cursor_sprite,
         out_w = config.width,
         out_h = config.height,
     ));
@@ -1439,6 +1440,36 @@ fn build_filter_graph(
     }
 
     graph
+}
+
+fn build_mouse_cursor_sprite_filter(fps: u32) -> String {
+    let mut filters = vec![
+        format!("color=c=black@0.0:s=32x32:r={fps}"),
+        "format=rgba".to_string(),
+    ];
+
+    // Outer black pointer body.
+    for y in 1..=14u32 {
+        filters.push(format!(
+            "drawbox=x=1:y={y}:w={w}:h=1:color=black@1.0:t=fill:replace=1",
+            w = y
+        ));
+    }
+    filters.push("drawbox=x=8:y=13:w=4:h=12:color=black@1.0:t=fill:replace=1".to_string());
+
+    // Inner white pointer fill.
+    for y in 2..=12u32 {
+        let w = y.saturating_sub(2);
+        if w == 0 {
+            continue;
+        }
+        filters.push(format!(
+            "drawbox=x=2:y={y}:w={w}:h=1:color=white@1.0:t=fill:replace=1"
+        ));
+    }
+    filters.push("drawbox=x=9:y=14:w=2:h=9:color=white@1.0:t=fill:replace=1".to_string());
+
+    filters.join(",")
 }
 
 fn codec_args_for_config(config: &ExportConfig) -> Vec<String> {
