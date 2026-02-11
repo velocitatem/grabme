@@ -3,12 +3,15 @@ resolver = "2"
 members = [
     "crates/common",
     "crates/project-model",
+    "crates/platform-core",
+    "crates/platform-linux",
+    "crates/platform-windows",
+    "crates/platform-macos",
     "crates/capture-engine",
     "crates/input-tracker",
     "crates/processing-core",
     "crates/render-engine",
     "crates/audio-ai",
-    "crates/platform-linux",
     "tools/grabme-cli",
     "apps/overlay-ui",
 ]
@@ -25,12 +28,15 @@ repository = "https://github.com/grabme/grabme"
 # Internal crates
 grabme-common = { path = "crates/common" }
 grabme-project-model = { path = "crates/project-model" }
+grabme-platform-core = { path = "crates/platform-core" }
 grabme-capture-engine = { path = "crates/capture-engine" }
 grabme-input-tracker = { path = "crates/input-tracker" }
 grabme-processing-core = { path = "crates/processing-core" }
 grabme-render-engine = { path = "crates/render-engine" }
 grabme-audio-ai = { path = "crates/audio-ai" }
 grabme-platform-linux = { path = "crates/platform-linux" }
+grabme-platform-windows = { path = "crates/platform-windows" }
+grabme-platform-macos = { path = "crates/platform-macos" }
 
 # Core dependencies
 anyhow = "1.0"

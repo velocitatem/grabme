@@ -9,6 +9,21 @@ use serde::{Deserialize, Serialize};
 /// Monotonic timestamp in nanoseconds since recording start.
 pub type TimestampNs = u64;
 
+/// Coordinate space used by recorded pointer values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PointerCoordinateSpace {
+    /// Coordinates are normalized directly against the captured region.
+    CaptureNormalized,
+    /// Coordinates are normalized against virtual desktop bounds.
+    VirtualDesktopNormalized,
+    /// Legacy variant normalized against root-origin virtual desktop.
+    VirtualDesktopRootOrigin,
+    /// Older recordings did not label coordinate-space explicitly.
+    #[default]
+    LegacyUnspecified,
+}
+
 /// A single recorded input event with timestamp.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputEvent {
@@ -112,6 +127,10 @@ pub struct EventStreamHeader {
 
     /// Nominal sampling rate for pointer events (Hz).
     pub pointer_sample_rate_hz: u32,
+
+    /// Coordinate-space contract for pointer x/y values.
+    #[serde(default)]
+    pub pointer_coordinate_space: PointerCoordinateSpace,
 }
 
 impl InputEvent {
@@ -271,6 +290,25 @@ mod tests {
         assert!(json.contains("\"type\":\"pointer\""));
         assert!(json.contains("\"x\":0.5"));
         assert!(json.contains("\"y\":0.3"));
+    }
+
+    #[test]
+    fn test_event_header_defaults_pointer_coordinate_space_for_legacy_files() {
+        let raw = r#"{
+            "schema_version":"1.0",
+            "epoch_monotonic_ns":0,
+            "epoch_wall":"2026-01-01T00:00:00Z",
+            "capture_width":1920,
+            "capture_height":1080,
+            "scale_factor":1.0,
+            "pointer_sample_rate_hz":60
+        }"#;
+
+        let parsed: EventStreamHeader = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed.pointer_coordinate_space,
+            PointerCoordinateSpace::LegacyUnspecified
+        );
     }
 
     #[test]

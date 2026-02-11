@@ -133,6 +133,10 @@ pub struct CursorConfig {
 
     /// Whether to show click animations.
     pub show_click_animation: bool,
+
+    /// Motion trail rendering controls.
+    #[serde(default)]
+    pub motion_trail: CursorMotionTrailConfig,
 }
 
 impl Default for CursorConfig {
@@ -143,6 +147,32 @@ impl Default for CursorConfig {
             size_multiplier: 1.0,
             custom_asset: None,
             show_click_animation: true,
+            motion_trail: CursorMotionTrailConfig::default(),
+        }
+    }
+}
+
+/// Cursor motion-trail rendering config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CursorMotionTrailConfig {
+    /// Enable ghosted cursor trail rendering.
+    pub enabled: bool,
+    /// Number of trailing ghosts to blend (2-4 recommended).
+    pub ghost_count: u8,
+    /// Minimum cursor speed (normalized units/sec) before trail appears.
+    pub speed_threshold: f64,
+    /// Frame spacing between trail ghosts.
+    pub frame_spacing: u8,
+}
+
+impl Default for CursorMotionTrailConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ghost_count: 3,
+            speed_threshold: 0.18,
+            frame_spacing: 2,
         }
     }
 }

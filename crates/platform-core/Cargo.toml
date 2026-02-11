@@ -1,0 +1,9 @@
+[package]
+name = "grabme-platform-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Cross-platform monitor/display contracts for GrabMe"
+
+[dependencies]
+serde = { workspace = true }

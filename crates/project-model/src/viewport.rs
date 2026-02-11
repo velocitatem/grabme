@@ -30,25 +30,25 @@ impl Viewport {
     };
 
     /// Create a new viewport, clamping values to valid range.
+    /// Extended range [-2.0, 3.0] allows for "zooming out" (canvas mode).
     pub fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
         Self {
-            x: x.clamp(0.0, 1.0),
-            y: y.clamp(0.0, 1.0),
-            w: w.clamp(0.01, 1.0), // minimum 1% width
-            h: h.clamp(0.01, 1.0), // minimum 1% height
+            x: x.clamp(-2.0, 3.0),
+            y: y.clamp(-2.0, 3.0),
+            w: w.clamp(0.01, 5.0), // minimum 1% width, max 5x zoom out
+            h: h.clamp(0.01, 5.0), // minimum 1% height
         }
     }
 
     /// Create a viewport centered at `(cx, cy)` with given dimensions.
-    /// Automatically clamps to stay within [0, 1] bounds.
+    /// Automatically clamps to stay within extended bounds.
     pub fn centered(cx: f64, cy: f64, w: f64, h: f64) -> Self {
-        let w = w.clamp(0.01, 1.0);
-        let h = h.clamp(0.01, 1.0);
+        let w = w.clamp(0.01, 5.0);
+        let h = h.clamp(0.01, 5.0);
 
-        let x = (cx - w / 2.0).clamp(0.0, 1.0 - w);
-        let y = (cy - h / 2.0).clamp(0.0, 1.0 - h);
-
-        Self { x, y, w, h }
+        // Center calculation doesn't change, just bounds check if strictly enforced
+        // But here we rely on new() to clamp
+        Self::new(cx - w / 2.0, cy - h / 2.0, w, h)
     }
 
     /// The center point of this viewport.
@@ -58,12 +58,12 @@ impl Viewport {
 
     /// Right edge.
     pub fn right(&self) -> f64 {
-        (self.x + self.w).min(1.0)
+        self.x + self.w
     }
 
     /// Bottom edge.
     pub fn bottom(&self) -> f64 {
-        (self.y + self.h).min(1.0)
+        self.y + self.h
     }
 
     /// Effective zoom factor (1.0 = no zoom, 2.0 = 200% zoom).
@@ -156,12 +156,23 @@ mod tests {
 
     #[test]
     fn test_centered_viewport_clamps() {
-        // Centered near edge should clamp
-        let vp = Viewport::centered(0.1, 0.1, 0.5, 0.5);
-        assert!(vp.x >= 0.0);
-        assert!(vp.y >= 0.0);
-        assert!(vp.right() <= 1.0);
-        assert!(vp.bottom() <= 1.0);
+        // Test clamping to extended bounds (-2.0 to 3.0) used for Canvas Mode
+
+        // Try to place way out left/top
+        let vp = Viewport::centered(-5.0, -5.0, 1.0, 1.0);
+        // Center at -5.0, width 1.0 -> x would be -5.5.
+        // Should clamp to min x = -2.0
+        assert!(vp.x >= -2.0);
+        assert!(vp.y >= -2.0);
+        assert!((vp.x - -2.0).abs() < 1e-9);
+
+        // Try to place way out right/bottom
+        let vp_far = Viewport::centered(5.0, 5.0, 1.0, 1.0);
+        // Center 5.0, width 1.0 -> x would be 4.5.
+        // Should clamp to max x = 3.0
+        assert!(vp_far.x <= 3.0);
+        assert!(vp_far.y <= 3.0);
+        assert!((vp_far.x - 3.0).abs() < 1e-9);
     }
 
     #[test]

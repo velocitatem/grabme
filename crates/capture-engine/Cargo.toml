@@ -8,7 +8,10 @@ description = "Screen, webcam, and audio capture engine for GrabMe"
 [dependencies]
 grabme-common = { workspace = true }
 grabme-project-model = { workspace = true }
+grabme-platform-core = { workspace = true }
 grabme-platform-linux = { workspace = true }
+grabme-platform-windows = { workspace = true }
+grabme-platform-macos = { workspace = true }
 grabme-input-tracker = { workspace = true }
 
 anyhow = { workspace = true }
@@ -16,5 +19,6 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+async-trait = "0.1"
 tracing = { workspace = true }
 gstreamer = { workspace = true }

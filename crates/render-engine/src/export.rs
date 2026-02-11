@@ -6,7 +6,9 @@ use std::process::{Command, Stdio};
 
 use grabme_common::error::{GrabmeError, GrabmeResult};
 use grabme_processing_core::cursor_smooth::CursorSmoother;
-use grabme_project_model::event::{parse_events, InputEvent};
+use grabme_project_model::event::{
+    parse_events, EventStreamHeader, InputEvent, PointerCoordinateSpace,
+};
 use grabme_project_model::project::{ExportConfig, ExportFormat, LoadedProject, WebcamCorner};
 use grabme_project_model::viewport::Viewport;
 
@@ -126,12 +128,19 @@ struct LoadedExportInputs {
     project: LoadedProject,
     screen_path: PathBuf,
     screen_offset_ns: i64,
+    screen_duration_secs: Option<f64>,
     source_width: u32,
     source_height: u32,
     webcam_path: Option<PathBuf>,
     webcam_offset_ns: Option<i64>,
+    webcam_duration_secs: Option<f64>,
     mic_path: Option<PathBuf>,
+    mic_offset_ns: Option<i64>,
+    mic_duration_secs: Option<f64>,
     system_audio_path: Option<PathBuf>,
+    system_audio_offset_ns: Option<i64>,
+    system_audio_duration_secs: Option<f64>,
+    events_header: Option<EventStreamHeader>,
     events: Vec<InputEvent>,
     duration_secs: f64,
 }
@@ -143,7 +152,9 @@ struct ExportPlan {
     expected_duration_secs: f64,
     smoothed_cursor: Vec<(u64, f64, f64)>,
     cursor_projection_model: CursorCoordinateModel,
+    force_full_screen_render: bool,
     debug_report: String,
+    sync_report_json: String,
 }
 
 #[derive(Debug, Default)]
@@ -151,6 +162,26 @@ struct VerificationSummary {
     sampled_frames: usize,
     out_of_bounds_cursors: usize,
     cut_frames_skipped: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MonitorPreCrop {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone)]
+struct CursorTrailLayer {
+    x_expr: String,
+    y_expr: String,
+    opacity: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CursorTrailPlan {
+    layers: Vec<CursorTrailLayer>,
 }
 
 struct FfmpegBackend;
@@ -165,11 +196,12 @@ const MAX_CURSOR_EXPR_POINTS: usize = 96;
 const CURSOR_EXPR_POINTS_PER_SEC: f64 = 8.0;
 #[allow(dead_code)]
 const CURSOR_SIMPLIFY_TOLERANCE_PX: f64 = 0.1;
-const FORCE_FULL_SCREEN_RENDER: bool = true;
 const CURSOR_ICON_SIZE: u32 = 32;
 const CURSOR_HOTSPOT_X: u32 = 5;
 const CURSOR_HOTSPOT_Y: u32 = 5;
 const CURSOR_ICON_SVG: &str = include_str!("../assets/cursor-pointer-lucide.svg");
+const SYNC_DRIFT_WARN_THRESHOLD_SECS: f64 = 0.120;
+const LEGACY_WEBCAM_OPACITY_DEFAULT: f64 = 0.92;
 
 impl FfmpegBackend {
     fn new() -> Self {
@@ -180,23 +212,28 @@ impl FfmpegBackend {
         let project = LoadedProject::load(&job.project_dir)
             .map_err(|e| GrabmeError::render(format!("Failed to load project: {e}")))?;
 
-        let screen_track = project
-            .project
-            .tracks
-            .screen
-            .as_ref()
-            .ok_or_else(|| GrabmeError::render("Project does not contain a screen track"))?;
-
-        let screen_path = job.project_dir.join(&screen_track.path);
-        if !screen_path.exists() {
-            return Err(GrabmeError::FileNotFound { path: screen_path });
-        }
-        let screen_offset_ns = screen_track.offset_ns;
+        let (screen_path, screen_offset_ns, mut duration_secs) =
+            resolve_screen_source(&job.project_dir, &project)?;
+        let screen_duration_secs = probe_media_duration(&screen_path);
 
         let (source_width, source_height) = probe_video_dimensions(&screen_path).unwrap_or((
             project.project.recording.capture_width,
             project.project.recording.capture_height,
         ));
+
+        if project.project.recording.monitor_width > 0
+            && project.project.recording.monitor_height > 0
+            && (source_width != project.project.recording.monitor_width
+                || source_height != project.project.recording.monitor_height)
+        {
+            tracing::warn!(
+                source_width,
+                source_height,
+                monitor_width = project.project.recording.monitor_width,
+                monitor_height = project.project.recording.monitor_height,
+                "Source dimensions differ from selected monitor metadata; pre-crop fallback may be applied"
+            );
+        }
 
         let webcam_track = project.project.tracks.webcam.as_ref();
         let webcam_offset_ns = webcam_track.map(|track| track.offset_ns);
@@ -214,22 +251,37 @@ impl FfmpegBackend {
         } else {
             None
         };
-
-        let mic_path = project
-            .project
-            .tracks
-            .mic
+        let webcam_duration_secs = webcam_path
             .as_ref()
+            .and_then(|path| probe_media_duration(path));
+
+        let mic_track = project.project.tracks.mic.as_ref();
+        let mic_offset_ns = mic_track.map(|track| track.offset_ns);
+        let mic_path = mic_track
             .map(|track| job.project_dir.join(&track.path))
             .filter(|path| path.exists());
-
-        let system_audio_path = project
-            .project
-            .tracks
-            .system_audio
+        let mic_offset_ns = if mic_path.is_some() {
+            mic_offset_ns
+        } else {
+            None
+        };
+        let mic_duration_secs = mic_path
             .as_ref()
+            .and_then(|path| probe_media_duration(path));
+
+        let system_track = project.project.tracks.system_audio.as_ref();
+        let system_audio_offset_ns = system_track.map(|track| track.offset_ns);
+        let system_audio_path = system_track
             .map(|track| job.project_dir.join(&track.path))
             .filter(|path| path.exists());
+        let system_audio_offset_ns = if system_audio_path.is_some() {
+            system_audio_offset_ns
+        } else {
+            None
+        };
+        let system_audio_duration_secs = system_audio_path
+            .as_ref()
+            .and_then(|path| probe_media_duration(path));
 
         let events_path = job.project_dir.join("meta").join("events.jsonl");
         let events_content = std::fs::read_to_string(&events_path).map_err(|e| {
@@ -238,11 +290,38 @@ impl FfmpegBackend {
                 events_path.display()
             ))
         })?;
+        let events_header = parse_events_header(&events_content);
         let events_jsonl = strip_events_header(&events_content);
         let events = parse_events(&events_jsonl)
             .map_err(|e| GrabmeError::render(format!("Failed to parse events stream: {e}")))?;
 
-        let mut duration_secs = screen_track.duration_secs;
+        if duration_secs <= 0.0 {
+            if let Some(probed_secs) = probe_media_duration(&screen_path) {
+                duration_secs = probed_secs;
+                tracing::info!(
+                    duration_secs,
+                    path = %screen_path.display(),
+                    "Resolved export duration from screen media"
+                );
+            }
+        }
+
+        if duration_secs <= 0.0 {
+            if let Some(last_event_secs) = latest_event_timestamp_secs(&events) {
+                duration_secs = last_event_secs;
+                tracing::info!(
+                    duration_secs,
+                    "Resolved export duration from latest input event"
+                );
+            }
+        }
+
+        if duration_secs <= 0.0 {
+            return Err(GrabmeError::render(
+                "Unable to determine recording duration from track metadata, media file, or events",
+            ));
+        }
+
         if let Some(end) = job.end_secs {
             duration_secs = duration_secs.min(end);
         }
@@ -254,12 +333,19 @@ impl FfmpegBackend {
             project,
             screen_path,
             screen_offset_ns,
+            screen_duration_secs,
             source_width,
             source_height,
             webcam_path,
             webcam_offset_ns,
+            webcam_duration_secs,
             mic_path,
+            mic_offset_ns,
+            mic_duration_secs,
             system_audio_path,
+            system_audio_offset_ns,
+            system_audio_duration_secs,
+            events_header,
             events,
             duration_secs,
         })
@@ -294,8 +380,10 @@ impl FfmpegBackend {
         let smoothing = CursorSmoother::algorithm_from_cursor_config(&cursor_config);
 
         let smoothed_cursor = CursorSmoother::new(smoothing).smooth(&inputs.events);
+        let force_full_screen = force_full_screen_render();
         let cursor_projection = maybe_override_cursor_projection(
-            CursorProjection::from_recording_geometry(
+            select_cursor_projection(
+                inputs.events_header.as_ref(),
                 &inputs.project.project.recording,
                 &smoothed_cursor,
             ),
@@ -305,8 +393,13 @@ impl FfmpegBackend {
             apply_cursor_projection(&smoothed_cursor, cursor_projection.transform);
         let fps = job.config.fps.max(1);
         let total_frames = (inputs.duration_secs * fps as f64).ceil() as u64;
+        let monitor_precrop = derive_monitor_precrop(
+            &inputs.project.project.recording,
+            inputs.source_width,
+            inputs.source_height,
+        );
 
-        let viewport_points = if FORCE_FULL_SCREEN_RENDER {
+        let viewport_points = if force_full_screen {
             vec![
                 (0.0, Viewport::FULL),
                 (inputs.duration_secs, Viewport::FULL),
@@ -326,7 +419,8 @@ impl FfmpegBackend {
             build_piecewise_expr(viewport_points.iter().map(|(t, vp)| (*t, vp.w)).collect());
         let h_expr =
             build_piecewise_expr(viewport_points.iter().map(|(t, vp)| (*t, vp.h)).collect());
-        let cursor_points = if FORCE_FULL_SCREEN_RENDER {
+        let viewport_scale_is_dynamic = viewport_scale_is_dynamic(&viewport_points);
+        let cursor_points = if force_full_screen {
             sample_cursor_points_full_screen(
                 &smoothed_cursor,
                 job.config.width,
@@ -348,6 +442,13 @@ impl FfmpegBackend {
             build_piecewise_expr(cursor_points.iter().map(|(t, x, _)| (*t, *x)).collect());
         let cursor_y_expr =
             build_piecewise_expr(cursor_points.iter().map(|(t, _, y)| (*t, *y)).collect());
+        let cursor_trail_plan = build_cursor_trail_plan(
+            &cursor_points,
+            &cursor_config.motion_trail,
+            fps,
+            job.config.width,
+            job.config.height,
+        );
 
         let cursor_icon_path = ensure_cursor_icon_file()?;
         let cursor_input_index = 1usize;
@@ -375,7 +476,7 @@ impl FfmpegBackend {
             None
         };
 
-        let filter = build_filter_graph(
+        let mut filter = build_filter_graph(
             &job.config,
             &x_expr,
             &y_expr,
@@ -385,26 +486,31 @@ impl FfmpegBackend {
             &cursor_y_expr,
             cursor_input_index,
             webcam_index,
+            monitor_precrop,
+            cursor_trail_plan.as_ref(),
+            viewport_scale_is_dynamic,
         );
-        let filter_len = filter.len();
-
-        let audio_map = if let Some(mic) = mic_index {
-            format!("{mic}:a:0?")
-        } else if let Some(system) = system_audio_index {
-            format!("{system}:a:0?")
-        } else {
-            "0:a?".to_string()
-        };
         let webcam_offset_delta_ns = inputs
             .webcam_offset_ns
             .map(|offset| offset - inputs.screen_offset_ns)
             .unwrap_or(0);
+        let mic_offset_delta_ns = inputs
+            .mic_offset_ns
+            .map(|offset| offset - inputs.screen_offset_ns)
+            .unwrap_or(0);
+        let system_offset_delta_ns = inputs
+            .system_audio_offset_ns
+            .map(|offset| offset - inputs.screen_offset_ns)
+            .unwrap_or(0);
+
+        let audio_map = append_audio_mix_if_needed(&mut filter, mic_index, system_audio_index);
+        let filter_len = filter.len();
 
         let mut args = vec![
             "-y".to_string(),
             "-hide_banner".to_string(),
             "-loglevel".to_string(),
-            "error".to_string(),
+            ffmpeg_loglevel(),
             "-nostats".to_string(),
             "-progress".to_string(),
             "pipe:1".to_string(),
@@ -422,13 +528,11 @@ impl FfmpegBackend {
         }
 
         if let Some(mic) = &inputs.mic_path {
-            args.push("-i".to_string());
-            args.push(mic.display().to_string());
+            append_input_with_offset(&mut args, mic, mic_offset_delta_ns);
         }
 
         if let Some(system_audio) = &inputs.system_audio_path {
-            args.push("-i".to_string());
-            args.push(system_audio.display().to_string());
+            append_input_with_offset(&mut args, system_audio, system_offset_delta_ns);
         }
 
         args.push("-filter_complex".to_string());
@@ -447,24 +551,43 @@ impl FfmpegBackend {
 
         args.push(job.output_path.display().to_string());
 
+        let sync_report_json = build_sync_report(
+            inputs,
+            webcam_offset_delta_ns,
+            mic_offset_delta_ns,
+            system_offset_delta_ns,
+            force_full_screen,
+            monitor_precrop,
+        );
+
         let debug_report = format!(
-            "duration_secs={:.3}\nframes={}\nviewport_mode={}\nviewport_keyframes={}\nviewport_points={}\ncursor_projection_model={}\ncursor_projection_score={:.4}\ncursor_icon={}\nwebcam_enabled={}\nwebcam_size_ratio={:.3}\nwebcam_corner={}\nwebcam_margin_ratio={:.3}\nwebcam_opacity={:.3}\nwebcam_offset_delta_ns={}\nsource_width={}\nsource_height={}\nsmoothed_cursor_points={}\ncursor_points={}\nexpr_len_x={}\nexpr_len_y={}\nexpr_len_w={}\nexpr_len_h={}\nexpr_len_cursor_x={}\nexpr_len_cursor_y={}\nfilter_len={}\nffmpeg_args={}\nplan_build_ms={}\n",
+            "duration_secs={:.3}\nframes={}\nviewport_mode={}\nviewport_keyframes={}\nviewport_points={}\nviewport_scale_dynamic={}\ncursor_projection_model={}\ncursor_projection_score={:.4}\ncursor_icon={}\ncursor_trail_layers={}\nwebcam_enabled={}\nwebcam_size_ratio={:.3}\nwebcam_corner={}\nwebcam_margin_ratio={:.3}\nwebcam_opacity={:.3}\nwebcam_offset_delta_ns={}\nmic_offset_delta_ns={}\nsystem_offset_delta_ns={}\nsource_width={}\nsource_height={}\nmonitor_precrop={}\nsmoothed_cursor_points={}\ncursor_points={}\nexpr_len_x={}\nexpr_len_y={}\nexpr_len_w={}\nexpr_len_h={}\nexpr_len_cursor_x={}\nexpr_len_cursor_y={}\nfilter_len={}\nffmpeg_args={}\nplan_build_ms={}\n",
             inputs.duration_secs,
             total_frames,
-            if FORCE_FULL_SCREEN_RENDER { "full_screen" } else { "timeline" },
+            if force_full_screen { "full_screen" } else { "timeline" },
             inputs.project.timeline.keyframes.len(),
             viewport_points.len(),
+            viewport_scale_is_dynamic,
             cursor_projection.model.as_str(),
             cursor_projection.score,
             cursor_icon_path.display(),
+            cursor_trail_plan
+                .as_ref()
+                .map(|plan| plan.layers.len())
+                .unwrap_or(0),
             job.config.webcam.enabled,
             job.config.webcam.size_ratio,
             webcam_corner_label(job.config.webcam.corner),
             job.config.webcam.margin_ratio,
-            job.config.webcam.opacity,
+            effective_webcam_opacity(job.config.webcam.opacity),
             webcam_offset_delta_ns,
+            mic_offset_delta_ns,
+            system_offset_delta_ns,
             inputs.source_width,
             inputs.source_height,
+            monitor_precrop
+                .map(|crop| format!("{}x{}+{}+{}", crop.width, crop.height, crop.x, crop.y))
+                .unwrap_or_else(|| "none".to_string()),
             smoothed_cursor.len(),
             cursor_points.len(),
             x_expr.len(),
@@ -483,6 +606,7 @@ impl FfmpegBackend {
             frames = total_frames,
             viewport_keyframes = inputs.project.timeline.keyframes.len(),
             viewport_points = viewport_points.len(),
+            viewport_scale_dynamic = viewport_scale_is_dynamic,
             cursor_projection_model = cursor_projection.model.as_str(),
             cursor_projection_score = cursor_projection.score,
             smoothed_cursor_points = smoothed_cursor.len(),
@@ -497,7 +621,9 @@ impl FfmpegBackend {
             expected_duration_secs: inputs.duration_secs,
             smoothed_cursor,
             cursor_projection_model: cursor_projection.model,
+            force_full_screen_render: force_full_screen,
             debug_report,
+            sync_report_json,
         })
     }
 
@@ -627,7 +753,7 @@ impl FfmpegBackend {
         plan: &ExportPlan,
     ) -> GrabmeResult<VerificationSummary> {
         let full_screen_timeline = grabme_project_model::timeline::Timeline::new();
-        let timeline = if FORCE_FULL_SCREEN_RENDER {
+        let timeline = if plan.force_full_screen_render {
             &full_screen_timeline
         } else {
             &inputs.project.timeline
@@ -701,6 +827,13 @@ impl RenderBackend for FfmpegBackend {
             tracing::info!(path = %debug_path.display(), "Wrote ffmpeg debug report");
         }
 
+        let sync_report_path = job.output_path.with_extension("sync-report.json");
+        if let Err(err) = std::fs::write(&sync_report_path, &plan.sync_report_json) {
+            tracing::warn!(error = %err, path = %sync_report_path.display(), "Failed to write sync report");
+        } else {
+            tracing::info!(path = %sync_report_path.display(), "Wrote export sync report");
+        }
+
         if let Some(cb) = &progress {
             cb(ExportProgress {
                 progress: 0.0,
@@ -747,6 +880,174 @@ fn strip_events_header(events_content: &str) -> String {
         .join("\n")
 }
 
+fn parse_events_header(events_content: &str) -> Option<EventStreamHeader> {
+    let header_line = events_content
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('#'))?;
+    let json = header_line.trim_start_matches('#').trim();
+    serde_json::from_str::<EventStreamHeader>(json).ok()
+}
+
+fn force_full_screen_render() -> bool {
+    let Ok(raw) = std::env::var("GRABME_FORCE_FULL_SCREEN_RENDER") else {
+        return false;
+    };
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn select_cursor_projection(
+    events_header: Option<&EventStreamHeader>,
+    recording: &grabme_project_model::project::RecordingConfig,
+    smoothed_cursor: &[(u64, f64, f64)],
+) -> CursorProjection {
+    let explicit_space = events_header
+        .map(|header| header.pointer_coordinate_space)
+        .filter(|space| *space != PointerCoordinateSpace::LegacyUnspecified)
+        .or_else(|| {
+            let space = recording.pointer_coordinate_space;
+            if space == PointerCoordinateSpace::LegacyUnspecified {
+                None
+            } else {
+                Some(space)
+            }
+        });
+
+    if let Some(space) = explicit_space {
+        if let Some(candidate) = projection_candidate_for_space(space, recording) {
+            return CursorProjection {
+                model: candidate.model,
+                transform: candidate.transform,
+                score: 1.0,
+            };
+        }
+    }
+
+    CursorProjection::from_recording_geometry(recording, smoothed_cursor)
+}
+
+fn projection_candidate_for_space(
+    space: PointerCoordinateSpace,
+    recording: &grabme_project_model::project::RecordingConfig,
+) -> Option<ProjectionCandidate> {
+    match space {
+        PointerCoordinateSpace::CaptureNormalized => Some(ProjectionCandidate {
+            model: CursorCoordinateModel::CaptureNormalized,
+            transform: PlaneTransform::identity(),
+        }),
+        PointerCoordinateSpace::VirtualDesktopNormalized => {
+            virtual_desktop_projection_candidates(recording)
+                .into_iter()
+                .find(|candidate| {
+                    candidate.model == CursorCoordinateModel::VirtualDesktopNormalized
+                })
+        }
+        PointerCoordinateSpace::VirtualDesktopRootOrigin => {
+            virtual_desktop_projection_candidates(recording)
+                .into_iter()
+                .find(|candidate| {
+                    candidate.model == CursorCoordinateModel::VirtualDesktopRootOrigin
+                })
+        }
+        PointerCoordinateSpace::LegacyUnspecified => None,
+    }
+}
+
+fn build_sync_report(
+    inputs: &LoadedExportInputs,
+    webcam_offset_delta_ns: i64,
+    mic_offset_delta_ns: i64,
+    system_offset_delta_ns: i64,
+    force_full_screen_render: bool,
+    monitor_precrop: Option<MonitorPreCrop>,
+) -> String {
+    let mut warnings = Vec::new();
+    let mut track_reports = Vec::new();
+
+    let screen_duration = inputs.screen_duration_secs;
+    track_reports.push(serde_json::json!({
+        "name": "screen",
+        "offset_ns": inputs.screen_offset_ns,
+        "delta_vs_screen_ns": 0,
+        "duration_secs": screen_duration,
+    }));
+
+    let mut push_track = |name: &str,
+                          offset_ns: Option<i64>,
+                          delta_ns: i64,
+                          duration_secs: Option<f64>| {
+        if offset_ns.is_none() {
+            return;
+        }
+
+        if (delta_ns as f64).abs() > SYNC_DRIFT_WARN_THRESHOLD_SECS * 1_000_000_000.0 {
+            warnings.push(format!(
+                "{name} offset delta ({delta_ns}ns) exceeds {:.0}ms",
+                SYNC_DRIFT_WARN_THRESHOLD_SECS * 1000.0
+            ));
+        }
+
+        if let (Some(screen), Some(track)) = (screen_duration, duration_secs) {
+            let expected_delta_secs = delta_ns as f64 / 1_000_000_000.0;
+            let inferred_delta_secs = screen - track;
+            if (inferred_delta_secs - expected_delta_secs).abs() > SYNC_DRIFT_WARN_THRESHOLD_SECS {
+                warnings.push(format!(
+                    "{name} inferred delta ({:.3}s) differs from offset delta ({:.3}s)",
+                    inferred_delta_secs, expected_delta_secs
+                ));
+            }
+        }
+
+        track_reports.push(serde_json::json!({
+            "name": name,
+            "offset_ns": offset_ns,
+            "delta_vs_screen_ns": delta_ns,
+            "duration_secs": duration_secs,
+        }));
+    };
+
+    push_track(
+        "webcam",
+        inputs.webcam_offset_ns,
+        webcam_offset_delta_ns,
+        inputs.webcam_duration_secs,
+    );
+    push_track(
+        "mic",
+        inputs.mic_offset_ns,
+        mic_offset_delta_ns,
+        inputs.mic_duration_secs,
+    );
+    push_track(
+        "system_audio",
+        inputs.system_audio_offset_ns,
+        system_offset_delta_ns,
+        inputs.system_audio_duration_secs,
+    );
+
+    let report = serde_json::json!({
+        "duration_secs": inputs.duration_secs,
+        "force_full_screen_render": force_full_screen_render,
+        "source_dimensions": {
+            "width": inputs.source_width,
+            "height": inputs.source_height,
+        },
+        "monitor_precrop": monitor_precrop.map(|crop| serde_json::json!({
+            "x": crop.x,
+            "y": crop.y,
+            "width": crop.width,
+            "height": crop.height,
+        })),
+        "tracks": track_reports,
+        "warnings": warnings,
+    });
+
+    serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+}
+
 #[allow(dead_code)]
 fn sample_viewport_points(
     timeline: &grabme_project_model::timeline::Timeline,
@@ -771,6 +1072,92 @@ fn sample_viewport_points(
     }
 
     points
+}
+
+fn viewport_scale_is_dynamic(
+    viewport_points: &[(f64, grabme_project_model::viewport::Viewport)],
+) -> bool {
+    const EPSILON: f64 = 1e-6;
+    let Some((_, first)) = viewport_points.first() else {
+        return false;
+    };
+
+    viewport_points
+        .iter()
+        .skip(1)
+        .any(|(_, vp)| (vp.w - first.w).abs() > EPSILON || (vp.h - first.h).abs() > EPSILON)
+}
+
+fn derive_monitor_precrop(
+    recording: &grabme_project_model::project::RecordingConfig,
+    source_width: u32,
+    source_height: u32,
+) -> Option<MonitorPreCrop> {
+    let monitor_w = recording.monitor_width;
+    let monitor_h = recording.monitor_height;
+    let virtual_w = recording.virtual_width;
+    let virtual_h = recording.virtual_height;
+
+    if monitor_w == 0 || monitor_h == 0 || virtual_w == 0 || virtual_h == 0 {
+        return None;
+    }
+
+    // If source already matches selected monitor, no pre-crop is needed.
+    if source_width == monitor_w && source_height == monitor_h {
+        return None;
+    }
+
+    // Only attempt fallback pre-crop when source dimensions look like a
+    // virtual-desktop capture while metadata points to a single monitor target.
+    let virtual_like = source_width >= monitor_w && source_height >= monitor_h;
+    if !virtual_like {
+        return None;
+    }
+
+    let scale_x = source_width as f64 / virtual_w as f64;
+    let scale_y = source_height as f64 / virtual_h as f64;
+
+    let raw_x = ((recording.monitor_x - recording.virtual_x) as f64 * scale_x).round();
+    let raw_y = ((recording.monitor_y - recording.virtual_y) as f64 * scale_y).round();
+    let raw_w = (recording.monitor_width as f64 * scale_x).round();
+    let raw_h = (recording.monitor_height as f64 * scale_y).round();
+
+    let mut x = raw_x.max(0.0) as u32;
+    let mut y = raw_y.max(0.0) as u32;
+    let mut width = raw_w.max(1.0) as u32;
+    let mut height = raw_h.max(1.0) as u32;
+
+    if x >= source_width || y >= source_height {
+        return None;
+    }
+
+    if x + width > source_width {
+        width = source_width.saturating_sub(x).max(1);
+    }
+    if y + height > source_height {
+        height = source_height.saturating_sub(y).max(1);
+    }
+
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    // Ensure even dimensions for encoder friendliness.
+    width = even_dimension(width as f64);
+    height = even_dimension(height as f64);
+    if x + width > source_width {
+        x = source_width.saturating_sub(width);
+    }
+    if y + height > source_height {
+        y = source_height.saturating_sub(height);
+    }
+
+    Some(MonitorPreCrop {
+        x,
+        y,
+        width,
+        height,
+    })
 }
 
 #[allow(dead_code)]
@@ -1010,6 +1397,89 @@ fn sample_cursor_points(
     }
 
     simplify_cursor_points(points, point_budget, CURSOR_SIMPLIFY_TOLERANCE_PX)
+}
+
+fn build_cursor_trail_plan(
+    cursor_points: &[(f64, f64, f64)],
+    config: &grabme_project_model::timeline::CursorMotionTrailConfig,
+    fps: u32,
+    out_w: u32,
+    out_h: u32,
+) -> Option<CursorTrailPlan> {
+    if !config.enabled || cursor_points.len() < 2 {
+        return None;
+    }
+
+    let ghost_count = config.ghost_count.clamp(2, 4) as usize;
+    let frame_spacing = config.frame_spacing.clamp(1, 8) as usize;
+    let fps = fps.max(1) as f64;
+    let threshold_px_per_s =
+        config.speed_threshold.clamp(0.0, 4.0) * out_w.min(out_h).max(1) as f64;
+
+    let mut speeds = vec![0.0; cursor_points.len()];
+    for idx in 1..cursor_points.len() {
+        let dt = (cursor_points[idx].0 - cursor_points[idx - 1].0).max(1e-6);
+        let dx = cursor_points[idx].1 - cursor_points[idx - 1].1;
+        let dy = cursor_points[idx].2 - cursor_points[idx - 1].2;
+        speeds[idx] = (dx * dx + dy * dy).sqrt() / dt;
+    }
+
+    let mut layers = Vec::with_capacity(ghost_count);
+    for ghost in 1..=ghost_count {
+        let lag_secs = (frame_spacing * ghost) as f64 / fps;
+        let opacity = (0.34 / ghost as f64).clamp(0.08, 0.35);
+        let mut points = Vec::with_capacity(cursor_points.len());
+
+        for (idx, (t, _, _)) in cursor_points.iter().enumerate() {
+            let speed = speeds[idx];
+            if speed < threshold_px_per_s {
+                points.push((*t, -2000.0, -2000.0));
+                continue;
+            }
+
+            let sample_t = (t - lag_secs).max(0.0);
+            let (sx, sy) = sample_cursor_point_at_time(cursor_points, sample_t)
+                .unwrap_or((cursor_points[0].1, cursor_points[0].2));
+            points.push((*t, sx, sy));
+        }
+
+        layers.push(CursorTrailLayer {
+            x_expr: build_piecewise_expr(points.iter().map(|(t, x, _)| (*t, *x)).collect()),
+            y_expr: build_piecewise_expr(points.iter().map(|(t, _, y)| (*t, *y)).collect()),
+            opacity,
+        });
+    }
+
+    Some(CursorTrailPlan { layers })
+}
+
+fn sample_cursor_point_at_time(points: &[(f64, f64, f64)], t_secs: f64) -> Option<(f64, f64)> {
+    if points.is_empty() {
+        return None;
+    }
+
+    if t_secs <= points[0].0 {
+        return Some((points[0].1, points[0].2));
+    }
+    if t_secs >= points[points.len() - 1].0 {
+        let last = points[points.len() - 1];
+        return Some((last.1, last.2));
+    }
+
+    for idx in 0..(points.len() - 1) {
+        let a = points[idx];
+        let b = points[idx + 1];
+        if t_secs >= a.0 && t_secs <= b.0 {
+            let duration = (b.0 - a.0).max(1e-6);
+            let alpha = ((t_secs - a.0) / duration).clamp(0.0, 1.0);
+            let x = a.1 + (b.1 - a.1) * alpha;
+            let y = a.2 + (b.2 - a.2) * alpha;
+            return Some((x, y));
+        }
+    }
+
+    let last = points[points.len() - 1];
+    Some((last.1, last.2))
 }
 
 #[allow(dead_code)]
@@ -1431,6 +1901,7 @@ fn build_piecewise_expr(mut points: Vec<(f64, f64)>) -> String {
     expr
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_filter_graph(
     config: &ExportConfig,
     x_expr: &str,
@@ -1441,29 +1912,127 @@ fn build_filter_graph(
     cursor_y_expr: &str,
     cursor_input_index: usize,
     webcam_index: Option<usize>,
+    monitor_precrop: Option<MonitorPreCrop>,
+    cursor_trail_plan: Option<&CursorTrailPlan>,
+    viewport_scale_is_dynamic: bool,
 ) -> String {
     let mut graph = String::new();
 
+    // Visual polish controls for the captured screen layer.
+    let corner_radius = config.canvas.corner_radius.max(1);
+    let shadow_pad = config.canvas.padding.max(1);
+    let shadow_blur = 15;
+    let shadow_opacity = config.canvas.shadow_intensity.clamp(0.0, 1.0);
+    let shadow_offset = 8;
+    let content_pad = shadow_pad.saturating_sub(shadow_offset as u32);
+
+    // Canvas / Background
+    let bg_color = normalize_ffmpeg_color(&config.canvas.background);
     graph.push_str(&format!(
-        "[0:v]crop=w='iw*({w})':h='ih*({h})':x='iw*({x})':y='ih*({y})',scale={out_w}:{out_h}:flags=lanczos,format=yuv420p[base];[{cursor_idx}:v]format=rgba,scale={cursor_size}:{cursor_size}:flags=lanczos[cursor_sprite];[base][cursor_sprite]overlay=x='({cx})-{hot_x}':y='({cy})-{hot_y}':eval=frame[scene]",
-        w = w_expr,
-        h = h_expr,
-        x = x_expr,
-        y = y_expr,
-        cx = cursor_x_expr,
-        cy = cursor_y_expr,
+        "color=c={bg_color}:s={out_w}x{out_h}[bg];",
+        out_w = config.width,
+        out_h = config.height
+    ));
+
+    let screen_input_label = if let Some(crop) = monitor_precrop {
+        graph.push_str(&format!(
+            "[0:v]crop=w={w}:h={h}:x={x}:y={y}[screen_src];",
+            w = crop.width,
+            h = crop.height,
+            x = crop.x,
+            y = crop.y,
+        ));
+        "[screen_src]"
+    } else {
+        "[0:v]"
+    };
+
+    // Screen Layer
+    // - Static-scale viewport: use polished rounded-corner + shadow stack.
+    // - Dynamic-scale viewport: fallback to direct composite to avoid filtergraph
+    //   frame-size reconfiguration failures on some ffmpeg builds.
+    if viewport_scale_is_dynamic {
+        graph.push_str(&format!(
+            "{screen_src}scale=w='max(2,trunc(({out_w}/({w}))/2)*2)':h='max(2,trunc(({out_h}/({h}))/2)*2)':eval=frame:flags=lanczos[screen_scaled];\
+             [bg][screen_scaled]overlay=x='({out_w})*(-{x})/({w})':y='({out_h})*(-{y})/({h})':eval=frame[base];",
+            screen_src = screen_input_label,
+            out_w = config.width,
+            out_h = config.height,
+            w = w_expr,
+            h = h_expr,
+            x = x_expr,
+            y = y_expr,
+        ));
+    } else {
+        graph.push_str(&format!(
+            "{screen_src}scale=w='max(2,trunc(({out_w}/({w}))/2)*2)':h='max(2,trunc(({out_h}/({h}))/2)*2)':eval=frame:flags=lanczos,format=yuva420p[screen_scaled];\
+             [screen_scaled]split[screen_for_mask][screen_for_comp];\
+             [screen_for_mask]format=gray,geq=lum='if(gt(abs(W/2-X),W/2-{R})*gt(abs(H/2-Y),H/2-{R}),if(lte((abs(W/2-X)-(W/2-{R}))^2+(abs(H/2-Y)-(H/2-{R}))^2,{R}^2),255,0),255)'[screen_mask];\
+             [screen_for_comp][screen_mask]alphamerge[screen_rounded];\
+             [screen_rounded]pad=w='iw+{PAD}*2':h='ih+{PAD}*2':x={PAD}:y={PAD}:color=0x00000000[padded_src];\
+             [padded_src]split[src_fg][src_for_shadow];\
+             [src_for_shadow]split[shadow_alpha_src][shadow_color_src];\
+             [shadow_alpha_src]alphaextract,gblur=sigma={BLUR}[shadow_alpha];\
+             [shadow_color_src]colorchannelmixer=rr=0:rg=0:rb=0:gr=0:gg=0:gb=0:br=0:bg=0:bb=0:aa=0[shadow_black];\
+             [shadow_black][shadow_alpha]alphamerge,colorchannelmixer=aa={OPACITY:.3}[shadow_layer];\
+             [shadow_layer][src_fg]overlay=x=-{OFFSET}:y=-{OFFSET}[window_comp];\
+             [bg][window_comp]overlay=x='({out_w})*(-{x})/({w})-{CONTENT_PAD}':y='({out_h})*(-{y})/({h})-{CONTENT_PAD}':eval=frame[base];",
+            screen_src = screen_input_label,
+            R = corner_radius,
+            PAD = shadow_pad,
+            BLUR = shadow_blur,
+            OPACITY = shadow_opacity,
+            OFFSET = shadow_offset,
+            CONTENT_PAD = content_pad,
+            out_w = config.width,
+            out_h = config.height,
+            w = w_expr,
+            h = h_expr,
+            x = x_expr,
+            y = y_expr,
+        ));
+    }
+
+    // 5. Cursor Overlay (+ optional trail layers)
+    graph.push_str(&format!(
+        "[{cursor_idx}:v]format=rgba,scale={cursor_size}:{cursor_size}:flags=lanczos[cursor_sprite];",
         cursor_idx = cursor_input_index,
         cursor_size = CURSOR_ICON_SIZE,
+    ));
+
+    let mut scene_input = "base".to_string();
+    if let Some(trail) = cursor_trail_plan {
+        for (idx, layer) in trail.layers.iter().enumerate() {
+            let sprite_label = format!("cursor_trail_sprite_{idx}");
+            let out_label = format!("base_trail_{idx}");
+            graph.push_str(&format!(
+                "[cursor_sprite]colorchannelmixer=aa={opacity:.3}[{sprite_label}];[{scene_input}][{sprite_label}]overlay=x='({cx})-{hot_x}':y='({cy})-{hot_y}':eval=frame[{out_label}];",
+                opacity = layer.opacity,
+                sprite_label = sprite_label,
+                scene_input = scene_input,
+                cx = layer.x_expr,
+                cy = layer.y_expr,
+                hot_x = CURSOR_HOTSPOT_X,
+                hot_y = CURSOR_HOTSPOT_Y,
+                out_label = out_label,
+            ));
+            scene_input = out_label;
+        }
+    }
+
+    graph.push_str(&format!(
+        "[{scene_input}][cursor_sprite]overlay=x='({cx})-{hot_x}':y='({cy})-{hot_y}':eval=frame[scene]",
+        scene_input = scene_input,
+        cx = cursor_x_expr,
+        cy = cursor_y_expr,
         hot_x = CURSOR_HOTSPOT_X,
         hot_y = CURSOR_HOTSPOT_Y,
-        out_w = config.width,
-        out_h = config.height,
     ));
 
     if let Some(webcam_idx) = webcam_index.filter(|_| config.webcam.enabled) {
         let webcam_size_ratio = config.webcam.size_ratio.clamp(0.08, 0.50);
         let webcam_margin_ratio = config.webcam.margin_ratio.clamp(0.0, 0.20);
-        let webcam_opacity = config.webcam.opacity.clamp(0.0, 1.0);
+        let webcam_opacity = effective_webcam_opacity(config.webcam.opacity);
 
         let webcam_w = even_dimension(config.width as f64 * webcam_size_ratio);
         let webcam_h = even_dimension(config.height as f64 * webcam_size_ratio);
@@ -1492,6 +2061,24 @@ fn build_filter_graph(
     graph
 }
 
+fn append_audio_mix_if_needed(
+    filter_graph: &mut String,
+    mic_index: Option<usize>,
+    system_audio_index: Option<usize>,
+) -> String {
+    match (mic_index, system_audio_index) {
+        (Some(mic), Some(system)) => {
+            filter_graph.push_str(&format!(
+                ";[{mic}:a:0]aresample=async=1:first_pts=0[amic];[{system}:a:0]aresample=async=1:first_pts=0[asystem];[amic][asystem]amix=inputs=2:weights='1 1':normalize=0[aout]"
+            ));
+            "[aout]".to_string()
+        }
+        (Some(mic), None) => format!("{mic}:a:0?"),
+        (None, Some(system)) => format!("{system}:a:0?"),
+        (None, None) => "0:a?".to_string(),
+    }
+}
+
 fn webcam_corner_label(corner: WebcamCorner) -> &'static str {
     match corner {
         WebcamCorner::TopLeft => "top_left",
@@ -1518,6 +2105,41 @@ fn even_dimension(raw: f64) -> u32 {
         value = value.saturating_sub(1).max(2);
     }
     value
+}
+
+fn normalize_ffmpeg_color(input: &str) -> String {
+    let trimmed = input.trim();
+    if let Some(hex) = trimmed.strip_prefix('#') {
+        if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return format!("0x{}", hex.to_ascii_lowercase());
+        }
+    }
+
+    if trimmed.starts_with("0x")
+        && trimmed.len() == 8
+        && trimmed[2..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return trimmed.to_ascii_lowercase();
+    }
+
+    "0x1a1a1a".to_string()
+}
+
+fn effective_webcam_opacity(raw: f64) -> f64 {
+    let clamped = raw.clamp(0.0, 1.0);
+    if (clamped - LEGACY_WEBCAM_OPACITY_DEFAULT).abs() < 1e-6 {
+        1.0
+    } else {
+        clamped
+    }
+}
+
+fn ffmpeg_loglevel() -> String {
+    std::env::var("GRABME_FFMPEG_LOGLEVEL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "error".to_string())
 }
 
 fn ensure_cursor_icon_file() -> GrabmeResult<PathBuf> {
@@ -1606,6 +2228,50 @@ fn command_exists(binary: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn resolve_screen_source(
+    project_dir: &std::path::Path,
+    project: &LoadedProject,
+) -> GrabmeResult<(PathBuf, i64, f64)> {
+    let mut declared_duration_secs = 0.0;
+    let mut declared_offset_ns = 0;
+    let mut declared_missing_path: Option<PathBuf> = None;
+
+    if let Some(screen_track) = project.project.tracks.screen.as_ref() {
+        declared_duration_secs = screen_track.duration_secs.max(0.0);
+        declared_offset_ns = screen_track.offset_ns;
+
+        let declared_path = project_dir.join(&screen_track.path);
+        if declared_path.exists() {
+            return Ok((declared_path, declared_offset_ns, declared_duration_secs));
+        }
+
+        tracing::warn!(
+            path = %declared_path.display(),
+            "Screen track file is missing; attempting fallback source lookup"
+        );
+        declared_missing_path = Some(declared_path);
+    } else {
+        tracing::warn!("Project metadata has no screen track; attempting fallback source lookup");
+    }
+
+    let fallback_path = project_dir.join("sources").join("screen.mkv");
+    if fallback_path.exists() {
+        tracing::warn!(
+            path = %fallback_path.display(),
+            "Using fallback screen source because project metadata is incomplete"
+        );
+        return Ok((fallback_path, declared_offset_ns, declared_duration_secs));
+    }
+
+    if let Some(path) = declared_missing_path {
+        return Err(GrabmeError::FileNotFound { path });
+    }
+
+    Err(GrabmeError::render(
+        "Project does not contain a screen track and no fallback source was found at sources/screen.mkv",
+    ))
+}
+
 fn probe_video_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
     let output = Command::new("ffprobe")
         .args([
@@ -1635,6 +2301,41 @@ fn probe_video_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
         return None;
     }
     Some((width, height))
+}
+
+fn probe_media_duration(path: &std::path::Path) -> Option<f64> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let duration = raw.lines().next()?.trim().parse::<f64>().ok()?;
+    if !duration.is_finite() || duration <= 0.0 {
+        return None;
+    }
+
+    Some(duration)
+}
+
+fn latest_event_timestamp_secs(events: &[InputEvent]) -> Option<f64> {
+    let secs = events.last()?.timestamp_secs();
+    if !secs.is_finite() || secs <= 0.0 {
+        return None;
+    }
+    Some(secs)
 }
 
 #[derive(Debug, Default)]
@@ -1897,10 +2598,44 @@ mod tests {
     }
 
     #[test]
+    fn test_build_cursor_trail_plan_generates_layers_when_enabled() {
+        let points = vec![
+            (0.0, 100.0, 100.0),
+            (0.05, 180.0, 120.0),
+            (0.10, 260.0, 150.0),
+            (0.15, 320.0, 180.0),
+        ];
+        let config = grabme_project_model::timeline::CursorMotionTrailConfig {
+            enabled: true,
+            ghost_count: 3,
+            speed_threshold: 0.01,
+            frame_spacing: 1,
+        };
+
+        let plan = build_cursor_trail_plan(&points, &config, 60, 1920, 1080)
+            .expect("trail plan should be generated");
+        assert_eq!(plan.layers.len(), 3);
+        assert!(plan.layers[0].x_expr.contains("if("));
+    }
+
+    #[test]
     fn test_build_filter_graph_webcam_uses_aspect_safe_scaling() {
         let config = grabme_project_model::project::Project::new("test", 1920, 1080, 60).export;
 
-        let graph = build_filter_graph(&config, "0", "0", "1", "1", "100", "200", 1, Some(2));
+        let graph = build_filter_graph(
+            &config,
+            "0",
+            "0",
+            "1",
+            "1",
+            "100",
+            "200",
+            1,
+            Some(2),
+            None,
+            None,
+            false,
+        );
 
         assert!(graph.contains("force_original_aspect_ratio=decrease"));
         assert!(graph.contains("pad="));
@@ -1908,11 +2643,86 @@ mod tests {
     }
 
     #[test]
+    fn test_build_filter_graph_quantizes_screen_scale_to_even_dimensions() {
+        let config = grabme_project_model::project::Project::new("test", 1920, 1080, 60).export;
+
+        let graph = build_filter_graph(
+            &config, "0.1", "0.1", "0.83", "0.83", "100", "200", 1, None, None, None, false,
+        );
+
+        assert!(graph.contains("scale=w='max(2,trunc((1920/(0.83))/2)*2)'"));
+        assert!(graph.contains("h='max(2,trunc((1080/(0.83))/2)*2)'"));
+    }
+
+    #[test]
+    fn test_build_filter_graph_uses_dynamic_scale_fallback_path() {
+        let config = grabme_project_model::project::Project::new("test", 1920, 1080, 60).export;
+
+        let graph = build_filter_graph(
+            &config, "-0.2", "0.1", "0.8", "0.8", "100", "200", 1, None, None, None, true,
+        );
+
+        assert!(graph.contains("[bg][screen_scaled]overlay"));
+        assert!(!graph.contains("[screen_for_mask]"));
+        assert!(!graph.contains("[shadow_layer]"));
+    }
+
+    #[test]
+    fn test_viewport_scale_is_dynamic_detects_size_changes() {
+        let static_points = vec![
+            (
+                0.0,
+                grabme_project_model::viewport::Viewport::new(0.0, 0.0, 1.0, 1.0),
+            ),
+            (
+                1.0,
+                grabme_project_model::viewport::Viewport::new(0.2, 0.2, 1.0, 1.0),
+            ),
+        ];
+        let dynamic_points = vec![
+            (
+                0.0,
+                grabme_project_model::viewport::Viewport::new(0.0, 0.0, 1.0, 1.0),
+            ),
+            (
+                1.0,
+                grabme_project_model::viewport::Viewport::new(0.2, 0.2, 0.7, 0.7),
+            ),
+        ];
+
+        assert!(!viewport_scale_is_dynamic(&static_points));
+        assert!(viewport_scale_is_dynamic(&dynamic_points));
+    }
+
+    #[test]
+    fn test_effective_webcam_opacity_promotes_legacy_default_to_opaque() {
+        assert!((effective_webcam_opacity(0.92) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_effective_webcam_opacity_preserves_non_legacy_values() {
+        assert!((effective_webcam_opacity(0.75) - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_build_filter_graph_skips_webcam_when_disabled() {
         let mut config = grabme_project_model::project::Project::new("test", 1920, 1080, 60).export;
         config.webcam.enabled = false;
 
-        let graph = build_filter_graph(&config, "0", "0", "1", "1", "100", "200", 1, Some(2));
+        let graph = build_filter_graph(
+            &config,
+            "0",
+            "0",
+            "1",
+            "1",
+            "100",
+            "200",
+            1,
+            Some(2),
+            None,
+            None,
+            false,
+        );
 
         assert!(graph.contains(";[scene]null[vout]"));
         assert!(!graph.contains("[2:v]scale"));
@@ -1933,6 +2743,139 @@ mod tests {
         assert_eq!(args[3], "/tmp/webcam.mkv");
     }
 
+    #[test]
+    fn test_append_input_with_negative_offset_includes_itsoffset() {
+        let mut args = Vec::new();
+        append_input_with_offset(
+            &mut args,
+            std::path::Path::new("/tmp/mic.wav"),
+            -125_000_000,
+        );
+
+        assert_eq!(args[0], "-itsoffset");
+        assert_eq!(args[1], "-0.125000");
+        assert_eq!(args[2], "-i");
+        assert_eq!(args[3], "/tmp/mic.wav");
+    }
+
+    #[test]
+    fn test_append_audio_mix_if_needed_builds_dual_source_mix() {
+        let mut filter = "[scene]null[vout]".to_string();
+        let map = append_audio_mix_if_needed(&mut filter, Some(3), Some(4));
+        assert_eq!(map, "[aout]");
+        assert!(filter.contains("amix=inputs=2"));
+        assert!(filter.contains("[3:a:0]"));
+        assert!(filter.contains("[4:a:0]"));
+    }
+
+    #[test]
+    fn test_derive_monitor_precrop_from_virtual_bounds_metadata() {
+        let recording = grabme_project_model::project::RecordingConfig {
+            capture_width: 2560,
+            capture_height: 1440,
+            fps: 60,
+            scale_factor: 1.0,
+            display_server: grabme_project_model::project::DisplayServer::X11,
+            cursor_hidden: true,
+            monitor_index: 1,
+            monitor_name: "DP-1".to_string(),
+            monitor_x: 1920,
+            monitor_y: 0,
+            monitor_width: 2560,
+            monitor_height: 1440,
+            virtual_x: 0,
+            virtual_y: 0,
+            virtual_width: 4480,
+            virtual_height: 1440,
+            pointer_coordinate_space: PointerCoordinateSpace::LegacyUnspecified,
+            audio_sample_rate: 48_000,
+        };
+
+        let crop = derive_monitor_precrop(&recording, 4480, 1440).expect("crop should be derived");
+        assert_eq!(crop.x, 1920);
+        assert_eq!(crop.y, 0);
+        assert_eq!(crop.width, 2560);
+        assert_eq!(crop.height, 1440);
+    }
+
+    #[test]
+    fn test_derive_monitor_precrop_clamps_to_source_bounds() {
+        let recording = grabme_project_model::project::RecordingConfig {
+            capture_width: 1920,
+            capture_height: 1080,
+            fps: 60,
+            scale_factor: 1.0,
+            display_server: grabme_project_model::project::DisplayServer::X11,
+            cursor_hidden: true,
+            monitor_index: 1,
+            monitor_name: "HDMI-1".to_string(),
+            monitor_x: 1700,
+            monitor_y: 900,
+            monitor_width: 500,
+            monitor_height: 300,
+            virtual_x: 0,
+            virtual_y: 0,
+            virtual_width: 1920,
+            virtual_height: 1080,
+            pointer_coordinate_space: PointerCoordinateSpace::LegacyUnspecified,
+            audio_sample_rate: 48_000,
+        };
+
+        let crop = derive_monitor_precrop(&recording, 1920, 1080).expect("crop should be derived");
+        assert_eq!(crop.x + crop.width, 1920);
+        assert_eq!(crop.y + crop.height, 1080);
+        assert_eq!(crop.width % 2, 0);
+        assert_eq!(crop.height % 2, 0);
+    }
+
+    #[test]
+    fn test_derive_monitor_precrop_returns_none_when_monitor_slot_is_outside_source() {
+        let recording = grabme_project_model::project::RecordingConfig {
+            capture_width: 1920,
+            capture_height: 1080,
+            fps: 60,
+            scale_factor: 1.0,
+            display_server: grabme_project_model::project::DisplayServer::X11,
+            cursor_hidden: true,
+            monitor_index: 1,
+            monitor_name: "HDMI-2".to_string(),
+            monitor_x: 5000,
+            monitor_y: 0,
+            monitor_width: 1920,
+            monitor_height: 1080,
+            virtual_x: 0,
+            virtual_y: 0,
+            virtual_width: 7680,
+            virtual_height: 2160,
+            pointer_coordinate_space: PointerCoordinateSpace::LegacyUnspecified,
+            audio_sample_rate: 48_000,
+        };
+
+        let crop = derive_monitor_precrop(&recording, 1920, 1080);
+        assert!(crop.is_none());
+    }
+
+    #[test]
+    fn test_select_cursor_projection_prefers_explicit_schema_mapping() {
+        let project = mock_project_with_geometry(0, 0, 2560, 1440, -1920, 0, 4480, 1440);
+        let header = EventStreamHeader {
+            schema_version: "1.0".to_string(),
+            epoch_monotonic_ns: 0,
+            epoch_wall: "2026-01-01T00:00:00Z".to_string(),
+            capture_width: 2560,
+            capture_height: 1440,
+            scale_factor: 1.0,
+            pointer_sample_rate_hz: 60,
+            pointer_coordinate_space: PointerCoordinateSpace::CaptureNormalized,
+        };
+        let smoothed = vec![(0u64, 0.2, 0.3), (16_000_000u64, 0.3, 0.35)];
+
+        let projection =
+            select_cursor_projection(Some(&header), &project.project.recording, &smoothed);
+        assert_eq!(projection.model, CursorCoordinateModel::CaptureNormalized);
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn mock_project_with_geometry(
         monitor_x: i32,
         monitor_y: i32,

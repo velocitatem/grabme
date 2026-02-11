@@ -164,15 +164,7 @@ pub fn build_x11_screen_pipeline(
 ) -> GrabmeResult<Box<dyn CapturePipeline>> {
     let path = escape_path(output_path);
     let show_pointer = if hide_cursor { "false" } else { "true" };
-    let region = capture_region
-        .map(|(x, y, width, height)| {
-            format!(
-                " startx={x} starty={y} endx={} endy={}",
-                x + width as i32,
-                y + height as i32
-            )
-        })
-        .unwrap_or_default();
+    let region = x11_capture_region_fragment(capture_region)?;
     let launch = format!(
         "ximagesrc use-damage=false show-pointer={show_pointer}{region} ! videoconvert ! videorate ! video/x-raw,framerate={fps}/1 ! x264enc tune=zerolatency speed-preset=veryfast ! matroskamux ! filesink location=\"{path}\""
     );
@@ -180,6 +172,34 @@ pub fn build_x11_screen_pipeline(
         "screen-x11",
         &launch,
     )?))
+}
+
+fn x11_capture_region_fragment(
+    capture_region: Option<(i32, i32, u32, u32)>,
+) -> GrabmeResult<String> {
+    let Some((x, y, width, height)) = capture_region else {
+        return Ok(String::new());
+    };
+
+    if width == 0 || height == 0 {
+        return Err(GrabmeError::capture(format!(
+            "Invalid X11 capture region {width}x{height} at ({x},{y})"
+        )));
+    }
+
+    let width_i32 = i32::try_from(width)
+        .map_err(|_| GrabmeError::capture(format!("X11 capture width too large: {width}")))?;
+    let height_i32 = i32::try_from(height)
+        .map_err(|_| GrabmeError::capture(format!("X11 capture height too large: {height}")))?;
+
+    let endx = x
+        .checked_add(width_i32 - 1)
+        .ok_or_else(|| GrabmeError::capture("X11 capture region x-range overflow"))?;
+    let endy = y
+        .checked_add(height_i32 - 1)
+        .ok_or_else(|| GrabmeError::capture("X11 capture region y-range overflow"))?;
+
+    Ok(format!(" startx={x} starty={y} endx={endx} endy={endy}"))
 }
 
 pub fn build_mic_pipeline(
@@ -275,4 +295,24 @@ fn detect_default_webcam_device() -> Option<String> {
 
 fn escape_path(path: &Path) -> String {
     path.to_string_lossy().replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::x11_capture_region_fragment;
+
+    #[test]
+    fn x11_region_fragment_uses_inclusive_end_coordinates() {
+        let fragment = x11_capture_region_fragment(Some((2560, 0, 2560, 1440))).unwrap();
+        assert_eq!(
+            fragment,
+            " startx=2560 starty=0 endx=5119 endy=1439".to_string()
+        );
+    }
+
+    #[test]
+    fn x11_region_fragment_rejects_zero_size() {
+        let err = x11_capture_region_fragment(Some((0, 0, 0, 1080))).unwrap_err();
+        assert!(err.to_string().contains("Invalid X11 capture region"));
+    }
 }

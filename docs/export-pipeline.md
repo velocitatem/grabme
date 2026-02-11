@@ -1,70 +1,66 @@
-# GrabMe Export Pipeline
+# Export Pipeline
 
 ## Overview
 
-The export pipeline transforms raw source media + editing decisions
-into a final rendered video file. This is an offline (non-real-time)
-process that prioritizes quality over speed.
+Export reads `project.json`, `timeline.json`, source media, and `events.jsonl`
+to build a deterministic FFmpeg graph.
 
-## Pipeline Architecture
+## Key behavior
 
-```
-┌─────────────┐     ┌──────────┐     ┌─────────────┐     ┌────────┐
-│ Source Video │────▶│ Crop/    │────▶│   Cursor    │────▶│ Encode │
-│ (screen.mkv)│     │ Scale    │     │   Overlay   │     │ (H.264)│
-└─────────────┘     └──────────┘     └─────────────┘     └────────┘
-                         ▲                  ▲                  │
-                         │                  │                  ▼
-                    ┌────┴────┐        ┌────┴────┐      ┌──────────┐
-                    │Timeline │        │ Events  │      │ output   │
-                    │Keyframes│        │(smoothed│      │ .mp4     │
-                    └─────────┘        └─────────┘      └──────────┘
-```
+- Timeline viewports are respected by default.
+- Full-screen override is available only for debugging:
+  - `GRABME_FORCE_FULL_SCREEN_RENDER=1`
+- Cursor coordinates prefer explicit schema metadata.
+- Legacy projects still use heuristic cursor projection fallback.
 
-## Per-Frame Processing
+## Stream alignment
 
-For each output frame:
+- Screen is the timeline reference (`t0`).
+- Webcam, mic, and system tracks apply per-track `offset_ns` relative to screen
+  via `-itsoffset`.
+- Both audio tracks are mixed when present:
+  - `amix=inputs=2:weights='1 1':normalize=0`
 
-1. **Time Mapping**: Convert frame number to source timestamp
-2. **Cut Check**: Skip if timestamp falls in a cut segment
-3. **Viewport Lookup**: Interpolate camera keyframes for this time
-4. **Source Crop**: Extract viewport region from source frame
-5. **Scale**: Resize cropped region to output resolution
-6. **Cursor Render**: Draw synthetic cursor at smoothed position
-7. **Webcam Composite**: Overlay webcam if present
-8. **Subtitle Burn**: Draw subtitle text if configured
-9. **Encode**: Feed frame to video encoder
+## Monitor pre-crop fallback
 
-Webcam composition details:
-- Uses per-track clock offsets to keep webcam aligned with screen timeline
-- Preserves webcam aspect ratio via scale+pad into a configurable PiP box
-- Supports corner placement and opacity via `export.webcam` settings
+If source dimensions look like a full virtual-desktop capture while recording
+metadata indicates a single monitor target, export pre-crops source video to
+the selected monitor slot before timeline transforms.
 
-## Codec Presets
+Inputs used for fallback:
 
-### MP4 H.264 (Default)
-- Profile: High
-- Bitrate: 8 Mbps (configurable)
-- Keyframe interval: 2 seconds
-- Audio: AAC 192kbps
+- `recording.monitor_x`
+- `recording.monitor_y`
+- `recording.monitor_width`
+- `recording.monitor_height`
+- `recording.virtual_x`
+- `recording.virtual_y`
+- `recording.virtual_width`
+- `recording.virtual_height`
 
-### MP4 H.265
-- Profile: Main
-- Bitrate: 5 Mbps (better compression)
-- Audio: AAC 192kbps
+## Canvas style controls
 
-### GIF
-- Palette: 256 colors, per-frame optimization
-- Max width: 800px (configurable)
-- FPS: 15 (configurable)
+`project.export.canvas` controls the cinematic frame styling:
 
-### WebM
-- Codec: VP9
-- Bitrate: 5 Mbps
-- Audio: Opus 128kbps
+- `background`
+- `corner_radius`
+- `shadow_intensity`
+- `padding`
 
-## Performance Targets
+Defaults preserve existing look.
 
-- Export speed: ≥0.5x realtime for H.264 baseline
-- Memory: <2GB for 1080p60 exports
-- Disk: Temporary space ≈ 2x source size
+## Cursor motion trail
+
+`timeline.cursor_config.motion_trail` enables optional ghosted cursor layers:
+
+- disabled by default
+- 2-4 trailing layers
+- speed-threshold gated
+
+## Diagnostics artifacts
+
+Each export writes:
+
+- `output.ffmpeg-debug.txt`
+- `output.sync-report.json`
+- `output.verification.json`

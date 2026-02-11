@@ -11,4 +11,5 @@ pub mod permissions;
 pub mod portal;
 
 pub use display::*;
+pub use grabme_platform_core::{DisplayServer, MonitorInfo};
 pub use portal::*;

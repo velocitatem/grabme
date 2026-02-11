@@ -42,6 +42,7 @@ pub async fn run(
         aspect_mode: AspectMode::Landscape,
         burn_subtitles: false,
         webcam: project.project.export.webcam.clone(),
+        canvas: project.project.export.canvas.clone(),
     };
 
     println!("  Output: {}", output_path.display());

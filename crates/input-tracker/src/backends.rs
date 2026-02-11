@@ -11,8 +11,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use grabme_common::error::GrabmeResult;
+use grabme_platform_core::virtual_desktop_bounds;
 use grabme_project_model::event::InputEvent;
-use grabme_project_model::event::{ButtonState, MouseButton};
+use grabme_project_model::event::{ButtonState, MouseButton, PointerCoordinateSpace};
 
 use crate::InputBackend;
 
@@ -155,6 +156,10 @@ impl InputBackend for EvdevBackend {
     fn is_available(&self) -> bool {
         true
     }
+
+    fn pointer_coordinate_space(&self) -> PointerCoordinateSpace {
+        PointerCoordinateSpace::VirtualDesktopNormalized
+    }
 }
 
 /// Stub backend for testing — generates synthetic events.
@@ -195,6 +200,10 @@ impl InputBackend for StubBackend {
 
     fn is_available(&self) -> bool {
         true
+    }
+
+    fn pointer_coordinate_space(&self) -> PointerCoordinateSpace {
+        PointerCoordinateSpace::CaptureNormalized
     }
 }
 
@@ -247,8 +256,7 @@ fn mice_device_diagnostic() -> String {
 fn desktop_geometry() -> (f64, f64, f64, f64) {
     match grabme_platform_linux::detect_monitors() {
         Ok(monitors) if !monitors.is_empty() => {
-            let (origin_x, origin_y, width, height) =
-                grabme_platform_linux::virtual_desktop_bounds(&monitors);
+            let (origin_x, origin_y, width, height) = virtual_desktop_bounds(&monitors);
             let width = width as f64;
             let height = height as f64;
             (
@@ -300,12 +308,8 @@ fn query_pointer_position(
         }
     }
 
-    let Some(x_px) = x_px else {
-        return None;
-    };
-    let Some(y_px) = y_px else {
-        return None;
-    };
+    let x_px = x_px?;
+    let y_px = y_px?;
 
     let (x, y) = normalize_virtual_point(x_px, y_px, origin_x, origin_y, width, height);
     Some((x, y))

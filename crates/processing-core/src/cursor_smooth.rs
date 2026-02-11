@@ -202,8 +202,8 @@ impl CursorSmoother {
             x = x + kx * (sx - x);
             y = y + ky * (sy - y);
 
-            px = (1.0 - kx) * px;
-            py = (1.0 - ky) * py;
+            px *= 1.0 - kx;
+            py *= 1.0 - ky;
 
             result.push((t, x, y));
         }

@@ -6,13 +6,16 @@ use eframe::egui::{self, Color32, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use grabme_capture_engine::{
     AudioCaptureConfig, CaptureMode, CaptureSession, ScreenCaptureConfig, SessionConfig,
 };
-use grabme_platform_linux::display::{detect_monitors, MonitorInfo};
+use grabme_platform_linux::{detect_monitors, MonitorInfo};
 use grabme_processing_core::auto_zoom::{AutoZoomAnalyzer, AutoZoomConfig};
 use grabme_project_model::event::parse_events;
 use grabme_project_model::project::{AspectMode, ExportConfig, ExportFormat, LoadedProject};
 use grabme_project_model::timeline::{CameraKeyframe, EasingFunction, KeyframeSource};
 use grabme_project_model::viewport::Viewport;
 use grabme_render_engine::export::{export_project, ExportJob, ExportProgress};
+
+mod webcam_preview;
+use webcam_preview::WebcamPreview;
 
 // ── Dimensions (logical pixels – intentionally small) ────────────────────────
 //
@@ -73,7 +76,9 @@ impl CountdownPreset {
 enum Stage {
     Idle,
     Countdown,
+    Starting,
     Recording,
+    Stopping,
     PostRecord,
     Rendering,
 }
@@ -82,8 +87,8 @@ impl Stage {
     /// Target window width for this stage.
     fn bubble_width(self) -> f32 {
         match self {
-            Stage::Idle | Stage::Countdown => BUBBLE_WIDTH_IDLE,
-            Stage::Recording => BUBBLE_WIDTH_RECORDING,
+            Stage::Idle | Stage::Countdown | Stage::Starting => BUBBLE_WIDTH_IDLE,
+            Stage::Recording | Stage::Stopping => BUBBLE_WIDTH_RECORDING,
             Stage::PostRecord | Stage::Rendering => BUBBLE_WIDTH_POST,
         }
     }
@@ -116,6 +121,8 @@ struct OverlayApp {
 
     // Recording
     session: Option<CaptureSession>,
+    start_task: Option<tokio::task::JoinHandle<Result<CaptureSession, String>>>,
+    stop_task: Option<tokio::task::JoinHandle<Result<PathBuf, String>>>,
     stage: Stage,
     prev_stage: Stage, // track transitions to avoid per-frame resizes
 
@@ -126,6 +133,7 @@ struct OverlayApp {
     mic: bool,
     system_audio: bool,
     webcam: bool,
+    webcam_preview_enabled: bool,
 
     // Dropdowns
     countdown_preset: CountdownPreset,
@@ -144,6 +152,9 @@ struct OverlayApp {
     render_receiver: Option<Receiver<RenderMessage>>,
     render_percent: f64,
     render_eta_secs: f64,
+
+    // Optional external live webcam preview process.
+    webcam_preview: WebcamPreview,
 
     // Window behavior
     centered_once: bool,
@@ -165,6 +176,8 @@ impl Default for OverlayApp {
         Self {
             runtime,
             session: None,
+            start_task: None,
+            stop_task: None,
             stage: Stage::Idle,
             prev_stage: Stage::Idle,
             project_name: "recording".to_string(),
@@ -173,6 +186,7 @@ impl Default for OverlayApp {
             mic: true,
             system_audio: true,
             webcam: false,
+            webcam_preview_enabled: false,
             countdown_preset: CountdownPreset::None,
             monitors,
             selected_monitor: 0.min(monitor_count.saturating_sub(1)),
@@ -183,6 +197,7 @@ impl Default for OverlayApp {
             render_receiver: None,
             render_percent: 0.0,
             render_eta_secs: 0.0,
+            webcam_preview: WebcamPreview::new(),
             centered_once: false,
             menus_open: false,
             prev_window_size: Vec2::new(BUBBLE_WIDTH_IDLE, BUBBLE_HEIGHT),
@@ -231,35 +246,103 @@ impl OverlayApp {
     }
 
     fn start_recording_now(&mut self) {
-        let mut session = CaptureSession::new(self.build_session_config());
-        match self.runtime.block_on(session.start()) {
-            Ok(()) => {
-                self.status = String::new();
-                self.last_export_path = None;
-                self.active_project_path = None;
-                self.stage = Stage::Recording;
-                self.session = Some(session);
-            }
-            Err(err) => {
-                self.status = format!("Failed: {err}");
-                self.stage = Stage::Idle;
-            }
+        if self.start_task.is_some() || self.stop_task.is_some() || self.session.is_some() {
+            return;
         }
+
+        self.status = "Starting...".to_string();
+        self.stage = Stage::Starting;
+
+        let config = self.build_session_config();
+        let handle = self.runtime.handle().clone();
+        self.start_task = Some(handle.spawn(async move {
+            let mut session = CaptureSession::new(config);
+            session.start().await.map_err(|e| e.to_string())?;
+            Ok(session)
+        }));
     }
 
     fn stop_recording(&mut self) {
+        if self.start_task.is_some() || self.stop_task.is_some() {
+            return;
+        }
+
+        self.webcam_preview.stop();
+
         let Some(mut session) = self.session.take() else {
             return;
         };
-        match self.runtime.block_on(session.stop()) {
-            Ok(path) => {
-                self.active_project_path = Some(path);
-                self.stage = Stage::PostRecord;
-                self.status = "Stopped".to_string();
+
+        self.status = "Stopping...".to_string();
+        self.stage = Stage::Stopping;
+
+        let handle = self.runtime.handle().clone();
+        self.stop_task =
+            Some(handle.spawn(async move { session.stop().await.map_err(|e| e.to_string()) }));
+    }
+
+    fn poll_session_tasks(&mut self) {
+        let start_finished = self
+            .start_task
+            .as_ref()
+            .map(|task| task.is_finished())
+            .unwrap_or(false);
+        if start_finished {
+            let task = self
+                .start_task
+                .take()
+                .expect("start task exists if finished");
+            match self.runtime.block_on(task) {
+                Ok(Ok(session)) => {
+                    self.status = String::new();
+                    self.last_export_path = None;
+                    self.active_project_path = None;
+                    self.stage = Stage::Recording;
+                    self.session = Some(session);
+
+                    if self.webcam && self.webcam_preview_enabled {
+                        if let Err(err) = self.webcam_preview.start() {
+                            self.status = format!("Webcam preview unavailable: {err}");
+                        }
+                    }
+                }
+                Ok(Err(err)) => {
+                    self.webcam_preview.stop();
+                    self.status = format!("Failed: {err}");
+                    self.stage = Stage::Idle;
+                }
+                Err(err) => {
+                    self.webcam_preview.stop();
+                    self.status = format!("Failed: {err}");
+                    self.stage = Stage::Idle;
+                }
             }
-            Err(err) => {
-                self.status = format!("Stop failed: {err}");
-                self.stage = Stage::Idle;
+        }
+
+        let stop_finished = self
+            .stop_task
+            .as_ref()
+            .map(|task| task.is_finished())
+            .unwrap_or(false);
+        if stop_finished {
+            let task = self.stop_task.take().expect("stop task exists if finished");
+            match self.runtime.block_on(task) {
+                Ok(Ok(path)) => {
+                    self.webcam_preview.stop();
+                    self.active_project_path = Some(path);
+                    self.stage = Stage::PostRecord;
+                    self.status = "Stopped".to_string();
+                }
+                Ok(Err(err)) => {
+                    self.webcam_preview.stop();
+                    self.status = format!("Stop failed: {err}");
+                    self.stage = Stage::Idle;
+                }
+                Err(err) => {
+                    self.webcam_preview.stop();
+                    self.status = format!("Stop failed: {err}");
+                    self.stage = Stage::Idle;
+                }
             }
         }
     }
@@ -315,6 +398,7 @@ impl OverlayApp {
                     aspect_mode: AspectMode::Landscape,
                     burn_subtitles: loaded.project.export.burn_subtitles,
                     webcam: loaded.project.export.webcam.clone(),
+                    canvas: loaded.project.export.canvas.clone(),
                 };
 
                 let tx_progress = tx.clone();
@@ -480,8 +564,9 @@ impl OverlayApp {
             return;
         }
 
-        let only_idle_menu_toggle =
-            self.stage == Stage::Idle && self.prev_stage == Stage::Idle && (target_size.x - self.prev_window_size.x).abs() <= 0.1;
+        let only_idle_menu_toggle = self.stage == Stage::Idle
+            && self.prev_stage == Stage::Idle
+            && (target_size.x - self.prev_window_size.x).abs() <= 0.1;
 
         if only_idle_menu_toggle {
             self.resize_preserving_top_left(ctx, target_size);
@@ -504,7 +589,9 @@ impl eframe::App for OverlayApp {
         // Repaint at ~16 fps – enough for animations, not wasteful
         ctx.request_repaint_after(std::time::Duration::from_millis(60));
         self.tick_countdown();
+        self.poll_session_tasks();
         self.poll_render_messages();
+        let _ = self.webcam_preview.is_running();
 
         // Center once on startup.
         if !self.centered_once {
@@ -520,10 +607,8 @@ impl eframe::App for OverlayApp {
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let full_rect = ui.max_rect();
-                let bubble_rect = Rect::from_min_size(
-                    full_rect.min,
-                    Vec2::new(full_rect.width(), BUBBLE_HEIGHT),
-                );
+                let bubble_rect =
+                    Rect::from_min_size(full_rect.min, Vec2::new(full_rect.width(), BUBBLE_HEIGHT));
 
                 // Background pill
                 ui.painter().rect_filled(
@@ -547,7 +632,9 @@ impl eframe::App for OverlayApp {
                 match self.stage {
                     Stage::Idle => self.draw_idle(ui, bubble_rect),
                     Stage::Countdown => self.draw_countdown(ui, bubble_rect),
+                    Stage::Starting => self.draw_starting(ui, bubble_rect),
                     Stage::Recording => self.draw_recording(ui, bubble_rect, ctx),
+                    Stage::Stopping => self.draw_stopping(ui, bubble_rect),
                     Stage::PostRecord => self.draw_post_record(ui, bubble_rect),
                     Stage::Rendering => self.draw_rendering(ui, bubble_rect),
                 }
@@ -566,10 +653,8 @@ impl OverlayApp {
         let cy = rect.center().y;
 
         // Red circle (record) button
-        let circle_rect = Rect::from_center_size(
-            Pos2::new(cx, cy),
-            Vec2::splat(CIRCLE_RADIUS * 2.0),
-        );
+        let circle_rect =
+            Rect::from_center_size(Pos2::new(cx, cy), Vec2::splat(CIRCLE_RADIUS * 2.0));
         let resp = ui.interact(circle_rect, ui.id().with("rec_btn"), Sense::click());
         ui.painter()
             .circle_filled(Pos2::new(cx, cy), CIRCLE_RADIUS, RED_IDLE);
@@ -590,8 +675,7 @@ impl OverlayApp {
             Pos2::new(dd_left, rect.top() + 3.0),
             Vec2::new(72.0, BUBBLE_HEIGHT - 6.0),
         );
-        let mut child =
-            ui.child_ui(dd_rect, egui::Layout::left_to_right(egui::Align::Center));
+        let mut child = ui.child_ui(dd_rect, egui::Layout::left_to_right(egui::Align::Center));
         let timer_id = child.make_persistent_id("timer_cb");
         egui::ComboBox::from_id_source("timer_cb")
             .width(56.0)
@@ -599,23 +683,22 @@ impl OverlayApp {
             .selected_text(self.countdown_preset.label())
             .show_ui(&mut child, |ui: &mut egui::Ui| {
                 for preset in CountdownPreset::ALL {
-                    ui.selectable_value(
-                        &mut self.countdown_preset,
-                        preset,
-                        preset.label(),
-                    );
+                    ui.selectable_value(&mut self.countdown_preset, preset, preset.label());
                 }
             });
         let timer_open = child.memory(|m| m.is_popup_open(timer_id.with("popup")));
 
         // Monitor dropdown
         let mon_left = dd_left + 76.0;
+        let toggles_left = rect.right() - PADDING - 72.0;
         let mon_rect = Rect::from_min_size(
             Pos2::new(mon_left, rect.top() + 3.0),
-            Vec2::new(rect.right() - mon_left - PADDING, BUBBLE_HEIGHT - 6.0),
+            Vec2::new(
+                (toggles_left - mon_left - 4.0).max(40.0),
+                BUBBLE_HEIGHT - 6.0,
+            ),
         );
-        let mut child =
-            ui.child_ui(mon_rect, egui::Layout::left_to_right(egui::Align::Center));
+        let mut child = ui.child_ui(mon_rect, egui::Layout::left_to_right(egui::Align::Center));
         let monitor_id = child.make_persistent_id("monitor_cb");
         let sel_label = self.monitor_label(self.selected_monitor);
         egui::ComboBox::from_id_source("monitor_cb")
@@ -628,6 +711,68 @@ impl OverlayApp {
                     ui.selectable_value(&mut self.selected_monitor, i, label);
                 }
             });
+
+        let cam_rect = Rect::from_min_size(
+            Pos2::new(toggles_left, rect.top() + 5.0),
+            Vec2::new(30.0, BUBBLE_HEIGHT - 10.0),
+        );
+        let cam_resp = ui.interact(cam_rect, ui.id().with("cam_toggle"), Sense::click());
+        let cam_color = if self.webcam {
+            ACCENT.linear_multiply(0.9)
+        } else {
+            Color32::from_rgb(65, 68, 78)
+        };
+        ui.painter()
+            .rect_filled(cam_rect, Rounding::same(6.0), cam_color);
+        ui.painter().text(
+            cam_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "CAM",
+            egui::FontId::proportional(9.0),
+            Color32::WHITE,
+        );
+        if cam_resp.clicked() {
+            self.webcam = !self.webcam;
+            if !self.webcam {
+                self.webcam_preview.stop();
+                self.webcam_preview_enabled = false;
+            }
+        }
+
+        let preview_rect = Rect::from_min_size(
+            Pos2::new(toggles_left + 34.0, rect.top() + 5.0),
+            Vec2::new(34.0, BUBBLE_HEIGHT - 10.0),
+        );
+        let preview_enabled = self.webcam && self.webcam_preview_enabled;
+        let preview_color = if preview_enabled {
+            Color32::from_rgb(86, 170, 250)
+        } else if self.webcam {
+            Color32::from_rgb(68, 80, 102)
+        } else {
+            Color32::from_rgb(52, 56, 64)
+        };
+        let preview_resp =
+            ui.interact(preview_rect, ui.id().with("preview_toggle"), Sense::click());
+        ui.painter()
+            .rect_filled(preview_rect, Rounding::same(6.0), preview_color);
+        ui.painter().text(
+            preview_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "PIP",
+            egui::FontId::proportional(9.0),
+            Color32::WHITE,
+        );
+        if preview_resp.clicked() && self.webcam {
+            self.webcam_preview_enabled = !self.webcam_preview_enabled;
+            if !self.webcam_preview_enabled {
+                self.webcam_preview.stop();
+            } else if self.stage == Stage::Recording {
+                if let Err(err) = self.webcam_preview.start() {
+                    self.status = format!("Webcam preview unavailable: {err}");
+                    self.webcam_preview_enabled = false;
+                }
+            }
+        }
 
         let monitor_open = child.memory(|m| m.is_popup_open(monitor_id.with("popup")));
         self.menus_open = timer_open || monitor_open;
@@ -706,6 +851,29 @@ impl OverlayApp {
         }
     }
 
+    fn draw_starting(&self, ui: &mut egui::Ui, rect: Rect) {
+        let cy = rect.center().y;
+        let cx = rect.left() + PADDING + CIRCLE_RADIUS + 2.0;
+
+        ui.painter()
+            .circle_filled(Pos2::new(cx, cy), CIRCLE_RADIUS * 0.7, RED_IDLE);
+        ui.painter().text(
+            Pos2::new(cx + CIRCLE_RADIUS + 10.0, cy),
+            egui::Align2::LEFT_CENTER,
+            "Starting...",
+            egui::FontId::proportional(12.0),
+            TEXT_DIM,
+        );
+    }
+
+    fn draw_stopping(&self, ui: &mut egui::Ui, rect: Rect) {
+        let cx = rect.center().x;
+        let cy = rect.center().y;
+
+        ui.painter()
+            .circle_filled(Pos2::new(cx, cy), CIRCLE_RADIUS * 0.7, RED_PULSE_DIM);
+    }
+
     // ── PostRecord: [Auto-Direct]  [Render]  [New] ──────────────────────────
 
     fn draw_post_record(&mut self, ui: &mut egui::Ui, rect: Rect) {
@@ -781,6 +949,7 @@ impl OverlayApp {
 
     // ── Pill button helper ──────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_pill_button(
         &mut self,
         ui: &mut egui::Ui,
@@ -825,6 +994,7 @@ impl OverlayApp {
                 "ad_btn" => self.run_auto_direct(),
                 "render_btn" => self.start_render(),
                 "new_btn" => {
+                    self.webcam_preview.stop();
                     self.stage = Stage::Idle;
                     self.active_project_path = None;
                     self.last_export_path = None;
@@ -858,8 +1028,8 @@ fn auto_direct_project(project_path: &Path) -> anyhow::Result<usize> {
     let events_path = project_path.join("meta").join("events.jsonl");
     let events_raw = std::fs::read_to_string(&events_path)
         .map_err(|e| anyhow::anyhow!("Failed to read events: {e}"))?;
-    let events = parse_events(&events_raw)
-        .map_err(|e| anyhow::anyhow!("Failed to parse events: {e}"))?;
+    let events =
+        parse_events(&events_raw).map_err(|e| anyhow::anyhow!("Failed to parse events: {e}"))?;
 
     if events.is_empty() {
         loaded.timeline.keyframes = vec![CameraKeyframe {

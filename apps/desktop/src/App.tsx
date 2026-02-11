@@ -1,247 +1,280 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { TimelineSegment, TimelineTrack } from "./components/TimelineTrack";
 
-type SmoothAlgorithm = "ema" | "bezier" | "kalman";
+type Viewport = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
 
-type InputEvent = {
+type CameraKeyframe = {
   t: number;
-  type: "pointer" | "click" | "scroll" | "key" | "window_focus";
-  x?: number;
-  y?: number;
-  state?: "down" | "up";
+  viewport: Viewport;
+  easing: string;
+  source: string;
 };
 
-type PointerSample = { t: number; x: number; y: number };
+type CursorMotionTrailConfig = {
+  enabled: boolean;
+  ghost_count: number;
+  speed_threshold: number;
+  frame_spacing: number;
+};
 
-type LoadedProjectBundle = {
+type CursorConfig = {
+  smoothing: string;
+  smoothing_factor: number;
+  size_multiplier: number;
+  custom_asset: string | null;
+  show_click_animation: boolean;
+  motion_trail: CursorMotionTrailConfig;
+};
+
+type Timeline = {
+  version: string;
+  keyframes: CameraKeyframe[];
+  effects: unknown[];
+  cursor_config: CursorConfig;
+  cuts: Array<{ start_secs: number; end_secs: number; reason: string }>;
+};
+
+type TimelineEditorBundle = {
   name: string;
-  width: number;
-  height: number;
   fps: number;
-  screen_path: string | null;
-  events: InputEvent[];
+  duration_secs: number;
+  timeline: Timeline;
 };
-
-const CURSOR_SVG =
-  "data:image/svg+xml;utf8," +
-  encodeURIComponent(
-    `<svg width="22" height="30" viewBox="0 0 22 30" xmlns="http://www.w3.org/2000/svg"><path d="M1 1L1 26L7.6 20.2L11.8 28.2L15 26.6L10.7 18.6L20.8 18.6L1 1Z" fill="#F7FAFF" stroke="#0A0A0A" stroke-width="1.2"/></svg>`
-  );
 
 export default function App(): JSX.Element {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-
   const [projectPath, setProjectPath] = useState("./recording");
-  const [bundle, setBundle] = useState<LoadedProjectBundle | null>(null);
+  const [bundle, setBundle] = useState<TimelineEditorBundle | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [timeSecs, setTimeSecs] = useState(0);
-  const [algorithm, setAlgorithm] = useState<SmoothAlgorithm>("ema");
-  const [strength, setStrength] = useState(0.35);
-  const [scale, setScale] = useState(1);
-  const [hudOpen, setHudOpen] = useState(true);
+  const [status, setStatus] = useState<string>("Load a project to begin");
+  const [dirty, setDirty] = useState(false);
+  const [zoom, setZoom] = useState(64);
 
-  useEffect(() => {
-    let raf = 0;
-    const tick = () => {
-      if (videoRef.current) {
-        setTimeSecs(videoRef.current.currentTime || 0);
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
+  const keyframes = useMemo(() => {
+    if (!bundle) {
+      return [];
+    }
+    return [...bundle.timeline.keyframes].sort((a, b) => a.t - b.t);
+  }, [bundle]);
 
-  async function loadProject() {
+  const segments = useMemo<TimelineSegment[]>(() => {
+    if (!bundle || keyframes.length === 0) {
+      return [];
+    }
+
+    return keyframes.map((frame, index) => {
+      const nextTime = keyframes[index + 1]?.t ?? bundle.duration_secs;
+      const zoomFactor = 1 / Math.max(frame.viewport.w, frame.viewport.h);
+      const tint = Math.min(0.85, 0.35 + zoomFactor * 0.15);
+      return {
+        id: `segment-${index}`,
+        label: `k${index + 1} ${Math.round(zoomFactor * 100)}%`,
+        start: frame.t,
+        end: Math.max(frame.t + 0.2, nextTime),
+        color: `rgba(35, 179, 139, ${tint.toFixed(3)})`
+      };
+    });
+  }, [bundle, keyframes]);
+
+  async function loadTimelineBundle() {
     setError(null);
+    setStatus("Loading timeline...");
     try {
-      const data = await invoke<LoadedProjectBundle>("load_project_bundle", { projectPath });
+      const data = await invoke<TimelineEditorBundle>("load_timeline_bundle", {
+        projectPath
+      });
+      data.timeline.keyframes.sort((a, b) => a.t - b.t);
       setBundle(data);
-    } catch (e) {
-      setError(String(e));
+      setDirty(false);
+      setStatus(`Loaded ${data.name}`);
+    } catch (loadError) {
+      setError(String(loadError));
+      setStatus("Failed to load timeline");
     }
   }
 
-  const pointers = useMemo(() => {
+  async function saveTimelineBundle() {
     if (!bundle) {
-      return [] as PointerSample[];
+      return;
     }
-    return bundle.events
-      .filter((event) =>
-        (event.type === "pointer" || event.type === "click" || event.type === "scroll") &&
-        typeof event.x === "number" &&
-        typeof event.y === "number"
-      )
-      .map((event) => ({ t: event.t / 1e9, x: clamp01(event.x as number), y: clamp01(event.y as number) }));
-  }, [bundle]);
+    setError(null);
+    setStatus("Saving timeline...");
+    try {
+      await invoke("save_timeline_bundle", {
+        projectPath,
+        payload: { timeline: bundle.timeline }
+      });
+      setDirty(false);
+      setStatus("Timeline saved");
+    } catch (saveError) {
+      setError(String(saveError));
+      setStatus("Failed to save timeline");
+    }
+  }
 
-  const clicks = useMemo(() => {
+  function updateSegment(segmentId: string, start: number, end: number) {
     if (!bundle) {
-      return [] as PointerSample[];
+      return;
     }
-    return bundle.events
-      .filter((event) => event.type === "click" && event.state === "down" && typeof event.x === "number" && typeof event.y === "number")
-      .map((event) => ({ t: event.t / 1e9, x: clamp01(event.x as number), y: clamp01(event.y as number) }));
-  }, [bundle]);
+    const index = Number(segmentId.replace("segment-", ""));
+    if (Number.isNaN(index)) {
+      return;
+    }
 
-  const smoothed = useMemo(() => {
-    if (algorithm === "ema") {
-      return smoothEma(pointers, strength);
-    }
-    if (algorithm === "bezier") {
-      return smoothBezier(pointers, strength);
-    }
-    return smoothKalman(pointers, strength);
-  }, [algorithm, pointers, strength]);
+    setBundle((prev) => {
+      if (!prev) {
+        return prev;
+      }
 
-  const pointer = useMemo(() => sampleAtTime(smoothed, timeSecs), [smoothed, timeSecs]);
-  const clickPulse = useMemo(() => {
-    const click = sampleAtTime(clicks, timeSecs);
-    if (!click) {
-      return null;
-    }
-    return clicks.some((c) => Math.abs(c.t - timeSecs) <= 0.2) ? click : null;
-  }, [clicks, timeSecs]);
+      const timeline = structuredClone(prev.timeline);
+      timeline.keyframes.sort((a, b) => a.t - b.t);
+      const frames = timeline.keyframes;
+      if (!frames[index]) {
+        return prev;
+      }
 
-  const videoSrc = useMemo(() => {
-    if (!bundle?.screen_path) {
-      return undefined;
+      const previousTime = index > 0 ? frames[index - 1].t : 0;
+      const nextMax = index + 1 < frames.length ? frames[index + 1].t : prev.duration_secs;
+
+      frames[index].t = clamp(start, previousTime, Math.max(previousTime, nextMax - 0.2));
+      if (index + 1 < frames.length) {
+        const minEnd = frames[index].t + 0.2;
+        frames[index + 1].t = clamp(end, minEnd, prev.duration_secs);
+      }
+
+      timeline.keyframes = frames.sort((a, b) => a.t - b.t);
+      return { ...prev, timeline };
+    });
+
+    setDirty(true);
+    setStatus("Unsaved timeline edits");
+  }
+
+  function setHideMouseJitter(enabled: boolean) {
+    if (!bundle) {
+      return;
     }
-    return convertFileSrc(bundle.screen_path);
-  }, [bundle]);
+
+    setBundle((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      const timeline = structuredClone(prev.timeline);
+      timeline.cursor_config.smoothing = enabled ? "ema" : "none";
+      timeline.cursor_config.smoothing_factor = enabled
+        ? Math.max(timeline.cursor_config.smoothing_factor, 0.35)
+        : 0;
+      return { ...prev, timeline };
+    });
+    setDirty(true);
+  }
+
+  const hideMouseJitter = Boolean(
+    bundle &&
+      bundle.timeline.cursor_config.smoothing !== "none" &&
+      bundle.timeline.cursor_config.smoothing_factor > 0
+  );
 
   return (
-    <main className="overlay-root">
-      <video ref={videoRef} className="video" controls src={videoSrc} />
-
-      {pointer ? (
-        <div
-          className="cursor"
-          style={{
-            left: `${pointer.x * 100}%`,
-            top: `${pointer.y * 100}%`,
-            transform: `translate(-12%, -8%) scale(${scale})`
-          }}
-        >
-          <img src={CURSOR_SVG} alt="cursor" />
+    <main className="editor-root">
+      <header className="editor-header">
+        <div>
+          <h1>GrabMe Timeline Prototype</h1>
+          <p>Record to analyze to tune keyframes to save</p>
         </div>
-      ) : null}
+        <span className={dirty ? "status-chip dirty" : "status-chip"}>{status}</span>
+      </header>
 
-      {clickPulse ? (
-        <div className="click" style={{ left: `${clickPulse.x * 100}%`, top: `${clickPulse.y * 100}%` }} />
-      ) : null}
-
-      <button className="hud-toggle" onClick={() => setHudOpen((v) => !v)}>
-        {hudOpen ? "-" : "+"}
-      </button>
-
-      {hudOpen ? (
-        <section className="hud">
+      <section className="control-row">
+        <label>
+          Project path
           <input
             value={projectPath}
-            onChange={(e) => setProjectPath(e.target.value)}
+            onChange={(event) => setProjectPath(event.target.value)}
             placeholder="./recording"
-            aria-label="project path"
           />
-          <button onClick={loadProject}>Load</button>
-          <select value={algorithm} onChange={(e) => setAlgorithm(e.target.value as SmoothAlgorithm)}>
-            <option value="ema">EMA</option>
-            <option value="bezier">Bezier</option>
-            <option value="kalman">Kalman</option>
-          </select>
-          <input type="range" min={0.05} max={0.95} step={0.01} value={strength} onChange={(e) => setStrength(Number(e.target.value))} />
-          <input type="range" min={0.8} max={2} step={0.05} value={scale} onChange={(e) => setScale(Number(e.target.value))} />
-          <small>{bundle?.name ?? "no project"} | t={timeSecs.toFixed(2)}s | n={pointers.length}</small>
-          {error ? <small className="error">{error}</small> : null}
-        </section>
+        </label>
+
+        <label>
+          Zoom
+          <input
+            type="range"
+            min={32}
+            max={220}
+            value={zoom}
+            onChange={(event) => setZoom(Number(event.target.value))}
+          />
+        </label>
+
+        <div className="button-group">
+          <button type="button" onClick={loadTimelineBundle}>
+            Load Timeline
+          </button>
+          <button type="button" onClick={saveTimelineBundle} disabled={!bundle || !dirty}>
+            Save Timeline
+          </button>
+        </div>
+      </section>
+
+      {bundle ? (
+        <>
+          <TimelineTrack
+            durationSecs={bundle.duration_secs}
+            pixelsPerSecond={zoom}
+            segments={segments}
+            onSegmentChange={updateSegment}
+          />
+
+          <section className="inspector-grid">
+            <article className="panel">
+              <h2>Session</h2>
+              <p>
+                {bundle.name} · {bundle.fps}fps · {bundle.duration_secs.toFixed(1)}s
+              </p>
+            </article>
+
+            <article className="panel">
+              <h2>Cursor</h2>
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={hideMouseJitter}
+                  onChange={(event) => setHideMouseJitter(event.target.checked)}
+                />
+                Hide Mouse Jitter
+              </label>
+              <small>
+                smoothing={bundle.timeline.cursor_config.smoothing} · factor=
+                {bundle.timeline.cursor_config.smoothing_factor.toFixed(2)}
+              </small>
+            </article>
+
+            <article className="panel">
+              <h2>Keyframes</h2>
+              <ul>
+                {keyframes.map((frame, index) => (
+                  <li key={`keyframe-${index}`}>
+                    t={frame.t.toFixed(2)}s · vp {frame.viewport.x.toFixed(2)},{" "}
+                    {frame.viewport.y.toFixed(2)} {frame.viewport.w.toFixed(2)}x
+                    {frame.viewport.h.toFixed(2)}
+                  </li>
+                ))}
+              </ul>
+            </article>
+          </section>
+        </>
       ) : null}
+
+      {error ? <p className="error-text">{error}</p> : null}
     </main>
   );
 }
 
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value));
-}
-
-function sampleAtTime(points: PointerSample[], timeSecs: number): PointerSample | null {
-  if (points.length === 0) {
-    return null;
-  }
-  let low = 0;
-  let high = points.length - 1;
-  while (low < high) {
-    const mid = Math.ceil((low + high) / 2);
-    if (points[mid].t <= timeSecs) {
-      low = mid;
-    } else {
-      high = mid - 1;
-    }
-  }
-  return points[low] ?? null;
-}
-
-function smoothEma(points: PointerSample[], strength: number): PointerSample[] {
-  if (points.length === 0) {
-    return [];
-  }
-  const alpha = clamp01(1 - strength);
-  const out: PointerSample[] = [];
-  let x = points[0].x;
-  let y = points[0].y;
-  for (const point of points) {
-    x = alpha * point.x + (1 - alpha) * x;
-    y = alpha * point.y + (1 - alpha) * y;
-    out.push({ ...point, x, y });
-  }
-  return out;
-}
-
-function smoothBezier(points: PointerSample[], strength: number): PointerSample[] {
-  if (points.length < 3) {
-    return points;
-  }
-  const pull = clamp01(strength);
-  const out: PointerSample[] = [points[0]];
-  for (let i = 1; i < points.length - 1; i += 1) {
-    const a = points[i - 1];
-    const b = points[i];
-    const c = points[i + 1];
-    const cx = (a.x + c.x) / 2;
-    const cy = (a.y + c.y) / 2;
-    out.push({
-      ...b,
-      x: b.x * (1 - pull) + cx * pull,
-      y: b.y * (1 - pull) + cy * pull
-    });
-  }
-  out.push(points[points.length - 1]);
-  return out;
-}
-
-function smoothKalman(points: PointerSample[], strength: number): PointerSample[] {
-  if (points.length === 0) {
-    return [];
-  }
-  const q = 0.001 + (1 - strength) * 0.01;
-  const r = 0.001 + strength * 0.04;
-  const out: PointerSample[] = [];
-
-  let x = points[0].x;
-  let y = points[0].y;
-  let px = 1;
-  let py = 1;
-
-  for (const point of points) {
-    px += q;
-    py += q;
-    const kx = px / (px + r);
-    const ky = py / (py + r);
-    x = x + kx * (point.x - x);
-    y = y + ky * (point.y - y);
-    px = (1 - kx) * px;
-    py = (1 - ky) * py;
-    out.push({ ...point, x, y });
-  }
-
-  return out;
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }

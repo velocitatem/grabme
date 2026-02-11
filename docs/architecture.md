@@ -1,107 +1,49 @@
 # GrabMe Architecture
 
-## System Overview
+## System layout
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                     GrabMe Desktop App                    │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │              Tauri v2 (apps/desktop/)              │  │
-│  │         React/TypeScript Frontend (UI)             │  │
-│  └─────────────────────┬──────────────────────────────┘  │
-│                        │ Tauri Commands (IPC)             │
-│  ┌─────────────────────┴──────────────────────────────┐  │
-│  │                 Rust Backend                        │  │
-│  │  ┌──────────────┐  ┌─────────────┐  ┌──────────┐  │  │
-│  │  │   Capture    │  │ Processing  │  │  Render  │  │  │
-│  │  │   Engine     │  │    Core     │  │  Engine  │  │  │
-│  │  └──────┬───────┘  └──────┬──────┘  └────┬─────┘  │  │
-│  │         │                 │               │        │  │
-│  │  ┌──────┴─────────────────┴───────────────┴─────┐  │  │
-│  │  │            Project Model (Shared)            │  │  │
-│  │  │    Events · Timeline · Viewport · Project    │  │  │
-│  │  └──────────────────────────────────────────────┘  │  │
-│  │         │                                          │  │
-│  │  ┌──────┴──────────────────────────────────────┐   │  │
-│  │  │         Platform Layer (Linux)              │   │  │
-│  │  │  Portal · PipeWire · Display · Permissions  │   │  │
-│  │  └─────────────────────────────────────────────┘   │  │
-│  └────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────┘
+```text
+apps/overlay-ui or tools/grabme-cli
+            |
+            v
+     grabme-capture-engine  ---> grabme-input-tracker
+            |                         |
+            |                         +--> events.jsonl
+            v
+      project bundle (sources + meta)
+            |
+            v
+      grabme-processing-core
+            |
+            v
+       grabme-render-engine
+            |
+            +--> output.mp4
+            +--> output.ffmpeg-debug.txt
+            +--> output.sync-report.json
+            +--> output.verification.json
 ```
 
-## Crate Dependency Graph
+## Platform abstraction
 
-```
-grabme-cli ──────────────┐
-                         ├──▶ grabme-capture-engine
-                         │        ├──▶ grabme-input-tracker
-                         │        ├──▶ grabme-platform-linux
-                         │        ├──▶ grabme-project-model
-                         │        └──▶ grabme-common
-                         │
-                         ├──▶ grabme-processing-core
-                         │        ├──▶ grabme-project-model
-                         │        └──▶ grabme-common
-                         │
-                         ├──▶ grabme-render-engine
-                         │        ├──▶ grabme-project-model
-                         │        └──▶ grabme-common
-                         │
-                         ├──▶ grabme-audio-ai
-                         │        ├──▶ grabme-project-model
-                         │        └──▶ grabme-common
-                         │
-                         └──▶ grabme-project-model
-                                  (no internal deps)
-```
+- `grabme-platform-core` defines shared monitor/display contracts:
+  - `MonitorInfo`
+  - `DisplayServer`
+  - virtual-desktop geometry helpers
+- `grabme-platform-linux` implements active capture/display logic.
+- `grabme-platform-windows` and `grabme-platform-macos` provide compile-safe
+  scaffolds to prevent interface churn while native backends are built.
 
-## Core Design Decisions
+## Capture-sync model
 
-### 1. Non-Destructive Pipeline
-Raw media is never modified. All editing decisions (zoom, cursor smoothing, cuts)
-are stored as metadata in `timeline.json` and applied during export rendering.
+- All pipelines are built first, then started as a near-simultaneous group.
+- Track offsets are recorded against the recording clock.
+- On stop, media durations are probed and offsets are corrected relative to the
+  screen track.
 
-### 2. Normalized Coordinates
-All pointer coordinates use [0.0, 1.0] range relative to the capture region.
-This survives DPI changes, monitor swaps, and resolution adjustments.
+## Export model
 
-### 3. Monotonic Clock Authority
-All stream synchronization is anchored to a monotonic nanosecond clock
-established at recording start. Wall-clock time is stored for display
-purposes only.
-
-### 4. Append-Only Events
-The event stream (events.jsonl) is append-only for crash safety.
-Even if the process dies mid-recording, all events up to the last
-flush are recoverable.
-
-### 5. Backend Abstraction
-Input tracking and render pipelines are behind trait interfaces,
-allowing multiple backends (evdev, portal, X11 for input;
-GStreamer, FFmpeg for render).
-
-## Data Flow
-
-### Recording
-```
-Screen ──GStreamer──▶ screen.mkv
-Mic ─────GStreamer──▶ mic.wav
-System ──PipeWire──▶  system.wav
-Mouse ───evdev─────▶  events.jsonl (append-only)
-                      project.json (written at stop)
-```
-
-### Analysis (Auto-Director)
-```
-events.jsonl ──▶ Chunk Analysis ──▶ Centroid + Velocity
-             ──▶ Keyframe Gen   ──▶ timeline.json
-             ──▶ Cursor Smooth  ──▶ (in-memory for preview/export)
-```
-
-### Export
-```
-screen.mkv ──┐
-timeline   ──┼──▶ Crop/Scale ──▶ Cursor Overlay ──▶ Encode ──▶ output.mp4
-events     ──┘
-```
+- Timeline viewports drive crop/scale by default.
+- `GRABME_FORCE_FULL_SCREEN_RENDER=1` keeps a debugging fallback.
+- Audio tracks are aligned to the screen timeline and mixed when both mic and
+  system tracks are present.

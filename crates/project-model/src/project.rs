@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::event::PointerCoordinateSpace;
 use crate::timeline::Timeline;
 
 /// Top-level project file (`project.json`).
@@ -60,6 +61,10 @@ pub struct RecordingConfig {
     #[serde(default)]
     pub monitor_index: usize,
 
+    /// Selected monitor identity at recording start.
+    #[serde(default)]
+    pub monitor_name: String,
+
     /// Monitor geometry at recording start (physical pixels).
     #[serde(default)]
     pub monitor_x: i32,
@@ -81,6 +86,10 @@ pub struct RecordingConfig {
     #[serde(default)]
     pub virtual_height: u32,
 
+    /// Coordinate-space used by pointer events for this recording.
+    #[serde(default)]
+    pub pointer_coordinate_space: PointerCoordinateSpace,
+
     /// Audio sample rate.
     pub audio_sample_rate: u32,
 }
@@ -91,6 +100,8 @@ pub struct RecordingConfig {
 pub enum DisplayServer {
     Wayland,
     X11,
+    Windows,
+    MacOS,
 }
 
 /// References to source media files (relative to project root).
@@ -170,6 +181,10 @@ pub struct ExportConfig {
     /// Webcam overlay configuration for export.
     #[serde(default)]
     pub webcam: WebcamConfig,
+
+    /// Canvas framing style controls for export rendering.
+    #[serde(default)]
+    pub canvas: CanvasStyleConfig,
 }
 
 /// Output video format.
@@ -220,6 +235,31 @@ pub struct WebcamConfig {
     pub opacity: f64,
 }
 
+/// Canvas/background styling controls used by the export renderer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CanvasStyleConfig {
+    /// Background color as hex string (for example `#1a1a1a`).
+    pub background: String,
+    /// Rounded corner radius in output pixels.
+    pub corner_radius: u32,
+    /// Shadow intensity multiplier in `[0.0, 1.0]`.
+    pub shadow_intensity: f64,
+    /// Padding around the content window in output pixels.
+    pub padding: u32,
+}
+
+impl Default for CanvasStyleConfig {
+    fn default() -> Self {
+        Self {
+            background: "#1a1a1a".to_string(),
+            corner_radius: 20,
+            shadow_intensity: 0.60,
+            padding: 56,
+        }
+    }
+}
+
 impl Default for WebcamConfig {
     fn default() -> Self {
         Self {
@@ -227,7 +267,7 @@ impl Default for WebcamConfig {
             size_ratio: 0.24,
             corner: WebcamCorner::BottomRight,
             margin_ratio: 0.03,
-            opacity: 0.92,
+            opacity: 1.0,
         }
     }
 }
@@ -274,6 +314,7 @@ impl Project {
                 display_server: DisplayServer::Wayland,
                 cursor_hidden: true,
                 monitor_index: 0,
+                monitor_name: String::new(),
                 monitor_x: 0,
                 monitor_y: 0,
                 monitor_width: width,
@@ -282,6 +323,7 @@ impl Project {
                 virtual_y: 0,
                 virtual_width: width,
                 virtual_height: height,
+                pointer_coordinate_space: PointerCoordinateSpace::LegacyUnspecified,
                 audio_sample_rate: 48000,
             },
             tracks: Tracks {
@@ -301,6 +343,7 @@ impl Project {
                 aspect_mode: AspectMode::Landscape,
                 burn_subtitles: false,
                 webcam: WebcamConfig::default(),
+                canvas: CanvasStyleConfig::default(),
             },
         }
     }
@@ -497,6 +540,12 @@ mod tests {
     }
 
     #[test]
+    fn test_webcam_default_opacity_is_opaque() {
+        let project = Project::new("Test", 1920, 1080, 30);
+        assert!((project.export.webcam.opacity - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_loaded_project_create_and_load() {
         let dir = std::env::temp_dir().join("grabme_test_project");
         let _ = std::fs::remove_dir_all(&dir);
@@ -529,5 +578,48 @@ mod tests {
         assert!(errors.iter().any(|e| e.contains("Screen source missing")));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_project_deserialization_defaults_new_recording_fields_for_legacy_files() {
+        let mut value = serde_json::to_value(Project::new("Legacy", 1920, 1080, 60)).unwrap();
+
+        let recording = value
+            .get_mut("recording")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("project.recording should be object");
+
+        for key in [
+            "monitor_index",
+            "monitor_name",
+            "monitor_x",
+            "monitor_y",
+            "monitor_width",
+            "monitor_height",
+            "virtual_x",
+            "virtual_y",
+            "virtual_width",
+            "virtual_height",
+            "pointer_coordinate_space",
+        ] {
+            recording.remove(key);
+        }
+
+        let parsed: Project = serde_json::from_value(value).unwrap();
+
+        assert_eq!(parsed.recording.monitor_index, 0);
+        assert_eq!(parsed.recording.monitor_name, "");
+        assert_eq!(parsed.recording.monitor_x, 0);
+        assert_eq!(parsed.recording.monitor_y, 0);
+        assert_eq!(parsed.recording.monitor_width, 0);
+        assert_eq!(parsed.recording.monitor_height, 0);
+        assert_eq!(parsed.recording.virtual_x, 0);
+        assert_eq!(parsed.recording.virtual_y, 0);
+        assert_eq!(parsed.recording.virtual_width, 0);
+        assert_eq!(parsed.recording.virtual_height, 0);
+        assert_eq!(
+            parsed.recording.pointer_coordinate_space,
+            PointerCoordinateSpace::LegacyUnspecified
+        );
     }
 }

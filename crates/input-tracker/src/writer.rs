@@ -84,7 +84,9 @@ impl Drop for EventWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grabme_project_model::event::{ButtonState, InputEvent, MouseButton};
+    use grabme_project_model::event::{
+        ButtonState, InputEvent, MouseButton, PointerCoordinateSpace,
+    };
 
     #[test]
     fn test_event_writer_roundtrip() {
@@ -101,6 +103,7 @@ mod tests {
             capture_height: 1080,
             scale_factor: 1.0,
             pointer_sample_rate_hz: 60,
+            pointer_coordinate_space: PointerCoordinateSpace::CaptureNormalized,
         };
 
         {

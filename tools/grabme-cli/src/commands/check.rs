@@ -11,7 +11,7 @@ pub fn run() -> anyhow::Result<()> {
     match ds {
         DisplayServer::Wayland => println!("[OK] Display server: Wayland"),
         DisplayServer::X11 => println!("[OK] Display server: X11"),
-        DisplayServer::Unknown => println!("[WARN] Display server: Unknown"),
+        _ => println!("[WARN] Display server: Unknown"),
     }
 
     // Check monitors

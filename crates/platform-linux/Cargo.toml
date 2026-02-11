@@ -7,6 +7,7 @@ description = "Linux platform integration: XDG Portal, PipeWire, DBus, and DPI h
 
 [dependencies]
 grabme-common = { workspace = true }
+grabme-platform-core = { workspace = true }
 
 anyhow = { workspace = true }
 thiserror = { workspace = true }

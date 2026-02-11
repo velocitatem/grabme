@@ -1,0 +1,13 @@
+[package]
+name = "grabme-platform-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "macOS platform scaffolding for GrabMe"
+
+[dependencies]
+grabme-common = { workspace = true }
+grabme-platform-core = { workspace = true }
+
+serde = { workspace = true }
+tracing = { workspace = true }

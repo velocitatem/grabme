@@ -416,7 +416,7 @@ mod tests {
         let analyzer = AutoZoomAnalyzer::with_defaults();
         let chunks = analyzer.chunk_events(&events);
 
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
         assert_eq!(chunks[0].activity, ActivityType::Dwell);
     }
 
@@ -434,7 +434,7 @@ mod tests {
         let analyzer = AutoZoomAnalyzer::with_defaults();
         let chunks = analyzer.chunk_events(&events);
 
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
         assert_eq!(chunks[0].activity, ActivityType::Scan);
     }
 

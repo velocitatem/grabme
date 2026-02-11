@@ -1,43 +1,11 @@
 //! Display/monitor detection and DPI handling.
 
 use grabme_common::error::GrabmeResult;
-use serde::{Deserialize, Serialize};
+use grabme_platform_core::{
+    denormalize_coords as core_denormalize_coords, normalize_coords as core_normalize_coords,
+    virtual_desktop_bounds as core_virtual_desktop_bounds, DisplayServer, MonitorInfo,
+};
 use std::process::Command;
-
-/// Information about a connected monitor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MonitorInfo {
-    /// Monitor name/identifier.
-    pub name: String,
-
-    /// Resolution in physical pixels.
-    pub width: u32,
-    pub height: u32,
-
-    /// Position in the virtual desktop (pixels).
-    pub x: i32,
-    pub y: i32,
-
-    /// Scale factor (e.g., 1.0, 1.25, 2.0).
-    pub scale_factor: f64,
-
-    /// Refresh rate in Hz.
-    pub refresh_rate_hz: u32,
-
-    /// Whether this is the primary monitor.
-    pub primary: bool,
-}
-
-impl MonitorInfo {
-    /// Logical resolution (physical / scale).
-    pub fn logical_width(&self) -> u32 {
-        (self.width as f64 / self.scale_factor) as u32
-    }
-
-    pub fn logical_height(&self) -> u32 {
-        (self.height as f64 / self.scale_factor) as u32
-    }
-}
 
 /// Detect connected monitors.
 pub fn detect_monitors() -> GrabmeResult<Vec<MonitorInfo>> {
@@ -47,7 +15,7 @@ pub fn detect_monitors() -> GrabmeResult<Vec<MonitorInfo>> {
     let monitors = match server {
         DisplayServer::Wayland => parse_wlr_randr_output().or_else(parse_xrandr_output),
         DisplayServer::X11 => parse_xrandr_output().or_else(parse_wlr_randr_output),
-        DisplayServer::Unknown => parse_xrandr_output().or_else(parse_wlr_randr_output),
+        _ => parse_xrandr_output().or_else(parse_wlr_randr_output),
     }
     .unwrap_or_else(default_monitor);
 
@@ -57,42 +25,19 @@ pub fn detect_monitors() -> GrabmeResult<Vec<MonitorInfo>> {
 /// Compute virtual desktop bounds that include all connected monitors.
 /// Returns `(min_x, min_y, width, height)` in physical pixels.
 pub fn virtual_desktop_bounds(monitors: &[MonitorInfo]) -> (i32, i32, u32, u32) {
-    if monitors.is_empty() {
-        return (0, 0, 1920, 1080);
-    }
-
-    let min_x = monitors.iter().map(|m| m.x).min().unwrap_or(0);
-    let min_y = monitors.iter().map(|m| m.y).min().unwrap_or(0);
-    let max_x = monitors
-        .iter()
-        .map(|m| m.x + m.width as i32)
-        .max()
-        .unwrap_or(1920);
-    let max_y = monitors
-        .iter()
-        .map(|m| m.y + m.height as i32)
-        .max()
-        .unwrap_or(1080);
-
-    let width = (max_x - min_x).max(1) as u32;
-    let height = (max_y - min_y).max(1) as u32;
-    (min_x, min_y, width, height)
+    core_virtual_desktop_bounds(monitors)
 }
 
 /// Normalize absolute pixel coordinates to [0.0, 1.0] range
 /// for a given monitor.
 pub fn normalize_coords(pixel_x: i32, pixel_y: i32, monitor: &MonitorInfo) -> (f64, f64) {
-    let x = (pixel_x - monitor.x) as f64 / monitor.width as f64;
-    let y = (pixel_y - monitor.y) as f64 / monitor.height as f64;
-    (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
+    core_normalize_coords(pixel_x, pixel_y, monitor)
 }
 
 /// Denormalize [0.0, 1.0] coordinates back to absolute pixels
 /// for a given monitor (used during rendering).
 pub fn denormalize_coords(norm_x: f64, norm_y: f64, width: u32, height: u32) -> (i32, i32) {
-    let x = (norm_x * width as f64) as i32;
-    let y = (norm_y * height as f64) as i32;
-    (x, y)
+    core_denormalize_coords(norm_x, norm_y, width, height)
 }
 
 /// Detect the current display server.
@@ -104,14 +49,6 @@ pub fn detect_display_server() -> DisplayServer {
     } else {
         DisplayServer::Unknown
     }
-}
-
-/// Display server type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DisplayServer {
-    Wayland,
-    X11,
-    Unknown,
 }
 
 fn parse_xrandr_output() -> Option<Vec<MonitorInfo>> {

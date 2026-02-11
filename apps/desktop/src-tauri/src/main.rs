@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use grabme_project_model::{event::InputEvent, LoadedProject};
-use serde::Serialize;
+use grabme_project_model::{event::InputEvent, timeline::Timeline, LoadedProject};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
 struct LoadedProjectBundle {
@@ -13,6 +13,19 @@ struct LoadedProjectBundle {
     fps: u32,
     screen_path: Option<String>,
     events: Vec<InputEvent>,
+}
+
+#[derive(Debug, Serialize)]
+struct TimelineEditorBundle {
+    name: String,
+    fps: u32,
+    duration_secs: f64,
+    timeline: Timeline,
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveTimelinePayload {
+    timeline: Timeline,
 }
 
 #[tauri::command]
@@ -39,6 +52,41 @@ fn load_project_bundle(project_path: String) -> Result<LoadedProjectBundle, Stri
         screen_path,
         events,
     })
+}
+
+#[tauri::command]
+fn load_timeline_bundle(project_path: String) -> Result<TimelineEditorBundle, String> {
+    let root = resolve_project_path(&project_path);
+    let loaded =
+        LoadedProject::load(&root).map_err(|e| format!("Failed to load project metadata: {e}"))?;
+
+    let duration_secs = loaded
+        .project
+        .tracks
+        .screen
+        .as_ref()
+        .map(|track| track.duration_secs)
+        .filter(|duration| *duration > 0.0)
+        .unwrap_or_else(|| loaded.timeline.duration_secs().max(1.0));
+
+    Ok(TimelineEditorBundle {
+        name: loaded.project.name,
+        fps: loaded.project.recording.fps,
+        duration_secs,
+        timeline: loaded.timeline,
+    })
+}
+
+#[tauri::command]
+fn save_timeline_bundle(project_path: String, payload: SaveTimelinePayload) -> Result<(), String> {
+    let root = resolve_project_path(&project_path);
+    let mut loaded =
+        LoadedProject::load(&root).map_err(|e| format!("Failed to load project metadata: {e}"))?;
+
+    loaded.timeline = payload.timeline;
+    loaded
+        .save()
+        .map_err(|e| format!("Failed to save timeline: {e}"))
 }
 
 fn resolve_project_path(project_path: &str) -> PathBuf {
@@ -72,7 +120,11 @@ fn read_events(path: &Path) -> Result<Vec<InputEvent>, String> {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![load_project_bundle])
+        .invoke_handler(tauri::generate_handler![
+            load_project_bundle,
+            load_timeline_bundle,
+            save_timeline_bundle
+        ])
         .run(tauri::generate_context!())
         .expect("error while running GrabMe desktop app");
 }

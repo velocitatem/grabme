@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use grabme_common::clock::RecordingClock;
 use grabme_common::error::GrabmeResult;
-use grabme_project_model::event::{EventStreamHeader, InputEvent};
+use grabme_project_model::event::{EventStreamHeader, InputEvent, PointerCoordinateSpace};
 
 /// Trait for input tracking backends.
 pub trait InputBackend: Send {
@@ -31,6 +31,11 @@ pub trait InputBackend: Send {
 
     /// Check if the backend is available on this system.
     fn is_available(&self) -> bool;
+
+    /// Coordinate-space contract for emitted pointer x/y values.
+    fn pointer_coordinate_space(&self) -> PointerCoordinateSpace {
+        PointerCoordinateSpace::LegacyUnspecified
+    }
 }
 
 /// The input tracker that coordinates a backend with event writing.
@@ -54,6 +59,7 @@ impl InputTracker {
         scale_factor: f64,
         pointer_sample_rate_hz: u32,
     ) -> GrabmeResult<Self> {
+        let pointer_coordinate_space = backend.pointer_coordinate_space();
         let header = EventStreamHeader {
             schema_version: "1.0".to_string(),
             epoch_monotonic_ns: 0,
@@ -62,6 +68,7 @@ impl InputTracker {
             capture_height,
             scale_factor,
             pointer_sample_rate_hz,
+            pointer_coordinate_space,
         };
 
         let writer = writer::EventWriter::new(output_path, header)?;

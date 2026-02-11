@@ -1,0 +1,13 @@
+[package]
+name = "grabme-platform-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Windows platform scaffolding for GrabMe"
+
+[dependencies]
+grabme-common = { workspace = true }
+grabme-platform-core = { workspace = true }
+
+serde = { workspace = true }
+tracing = { workspace = true }
