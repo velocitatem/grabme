@@ -181,11 +181,11 @@ pub fn run(
     Ok(())
 }
 
-const PRODUCTION_CLICK_ZOOM_SIZE: f64 = 0.94;
-const PRODUCTION_CLICK_LEAD_SECS: f64 = 0.06;
-const PRODUCTION_CLICK_HOLD_SECS: f64 = 0.10;
-const PRODUCTION_CLICK_RELEASE_SECS: f64 = 0.28;
-const PRODUCTION_CLICK_COOLDOWN_SECS: f64 = 0.16;
+const PRODUCTION_CLICK_ZOOM_SIZE: f64 = 0.97;
+const PRODUCTION_CLICK_LEAD_SECS: f64 = 0.05;
+const PRODUCTION_CLICK_HOLD_SECS: f64 = 0.08;
+const PRODUCTION_CLICK_RELEASE_SECS: f64 = 0.22;
+const PRODUCTION_CLICK_COOLDOWN_SECS: f64 = 3.0;
 
 fn build_production_timeline(events: &[InputEvent]) -> Timeline {
     let mut keyframes = vec![full_keyframe(0.0, EasingFunction::EaseInOut)];
@@ -696,6 +696,44 @@ mod tests {
             .keyframes
             .iter()
             .any(|kf| kf.time_secs > 1.0 && kf.viewport == Viewport::FULL));
+    }
+
+    #[test]
+    fn test_build_production_timeline_rate_limits_click_zooms() {
+        let events = vec![
+            InputEvent::pointer(0, 0.5, 0.5),
+            InputEvent::click(
+                1_000_000_000,
+                MouseButton::Left,
+                ButtonState::Down,
+                0.5,
+                0.5,
+            ),
+            InputEvent::click(
+                2_000_000_000,
+                MouseButton::Left,
+                ButtonState::Down,
+                0.6,
+                0.6,
+            ),
+            InputEvent::click(
+                4_200_000_000,
+                MouseButton::Left,
+                ButtonState::Down,
+                0.7,
+                0.7,
+            ),
+        ];
+
+        let timeline = build_production_timeline(&events);
+        let zoom_keyframes = timeline
+            .keyframes
+            .iter()
+            .filter(|kf| kf.viewport.w < 1.0 || kf.viewport.h < 1.0)
+            .count();
+
+        // 2 accepted clicks (t=1.0 and t=4.2), each pulse contributes 2 zoom keyframes.
+        assert_eq!(zoom_keyframes, 4);
     }
 
     #[test]
