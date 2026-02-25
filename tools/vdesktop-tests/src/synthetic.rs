@@ -1,8 +1,7 @@
 //! Synthetic test pattern generation
 
 use image::{ImageBuffer, Rgb, RgbImage};
-use imageproc::drawing::{draw_filled_circle_mut, draw_filled_rect_mut, draw_line_segment_mut};
-use imageproc::rect::Rect;
+use imageproc::drawing::draw_filled_circle_mut;
 
 /// Create tracking pattern with colored markers at known positions
 pub fn create_tracking_pattern(width: u32, height: u32) -> RgbImage {
@@ -21,7 +20,7 @@ pub fn create_tracking_pattern(width: u32, height: u32) -> RgbImage {
         draw_filled_circle_mut(
             &mut img,
             (*x as i32, *y as i32),
-            marker_radius,
+            marker_radius as i32,
             Rgb([255, 50, 50]),
         );
     }
@@ -45,7 +44,7 @@ pub fn create_tracking_pattern(width: u32, height: u32) -> RgbImage {
     ];
 
     for (x, y) in &edge_markers {
-        draw_filled_circle_mut(&mut img, (*x as i32, *y as i32), 15, Rgb([50, 50, 255]));
+        draw_filled_circle_mut(&mut img, (*x as i32, *y as i32), 15i32, Rgb([50, 50, 255]));
     }
 
     img
@@ -93,7 +92,7 @@ pub fn create_grid_pattern(width: u32, height: u32) -> RgbImage {
     ];
 
     for (x, y) in &quadrants {
-        draw_filled_circle_mut(&mut img, (*x as i32, *y as i32), 8, Rgb([200, 150, 50]));
+        draw_filled_circle_mut(&mut img, (*x as i32, *y as i32), 8i32, Rgb([200, 150, 50]));
     }
 
     img
@@ -104,9 +103,9 @@ pub fn create_quality_pattern(width: u32, height: u32) -> RgbImage {
     let mut img = ImageBuffer::from_pixel(width, height, Rgb([50, 50, 50]));
 
     // Checkerboard pattern in top-left
-    let checker_size = 20;
-    for y in (0..height / 3).step_by(checker_size) {
-        for x in (0..width / 3).step_by(checker_size) {
+    let checker_size = 20u32;
+    for y in (0..height / 3).step_by(checker_size as usize) {
+        for x in (0..width / 3).step_by(checker_size as usize) {
             let color = if (x / checker_size + y / checker_size) % 2 == 0 {
                 Rgb([200, 200, 200])
             } else {

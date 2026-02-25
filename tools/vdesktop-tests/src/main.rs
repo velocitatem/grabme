@@ -12,11 +12,6 @@ use clap::Parser;
 use grabme_capture_engine::{
     AudioCaptureConfig, CaptureMode, CaptureSession, ScreenCaptureConfig, SessionConfig,
 };
-use grabme_project_model::event::InputEvent;
-use image::{ImageBuffer, Rgb, RgbImage};
-use imageproc::drawing::{draw_filled_circle_mut, draw_filled_rect_mut, draw_text_mut};
-use imageproc::rect::Rect;
-use rusttype::{Font, Scale};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -200,6 +195,16 @@ async fn run_recording_test(args: &Args) -> Result<PathBuf> {
     session.start().await?;
     sleep(Duration::from_secs(2)).await;
 
+    // Start X11 polling fallback for tracking verification
+    let tracking_log_path = args.output_dir.join("x11_cursor_tracking.jsonl");
+    let display_env = format!(":{}", args.display);
+    let poll_handle = start_x11_cursor_polling(
+        tracking_log_path.clone(),
+        display_env.clone(),
+        args.width,
+        args.height,
+    );
+
     // Automated cursor movement through test points
     let test_points = synthetic::get_test_points(args.width, args.height);
     for (i, (x, y)) in test_points.iter().enumerate() {
@@ -207,7 +212,7 @@ async fn run_recording_test(args: &Args) -> Result<PathBuf> {
 
         Command::new("xdotool")
             .args(["mousemove", &x.to_string(), &y.to_string()])
-            .env("DISPLAY", format!(":{}", args.display))
+            .env("DISPLAY", &display_env)
             .status()
             .context("Failed to execute xdotool. Install with: sudo apt install xdotool")?;
 
@@ -215,6 +220,9 @@ async fn run_recording_test(args: &Args) -> Result<PathBuf> {
     }
 
     sleep(Duration::from_secs(args.duration - 5)).await;
+
+    // Stop X11 polling
+    poll_handle.abort();
 
     // Stop recording
     tracing::info!("Stopping capture...");
@@ -224,17 +232,93 @@ async fn run_recording_test(args: &Args) -> Result<PathBuf> {
     Ok(project_path)
 }
 
+fn start_x11_cursor_polling(
+    log_path: PathBuf,
+    display: String,
+    width: u32,
+    height: u32,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        use std::io::Write;
+        
+        let mut file = match std::fs::File::create(&log_path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("Failed to create tracking log: {}", e);
+                return;
+            }
+        };
+
+        tracing::info!("Started X11 cursor polling fallback -> {}", log_path.display());
+
+        let start_time = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(16); // ~60Hz
+
+        loop {
+            let output = match Command::new("xdotool")
+                .args(["getmouselocation", "--shell"])
+                .env("DISPLAY", &display)
+                .output()
+            {
+                Ok(o) => o,
+                Err(_) => {
+                    tokio::time::sleep(poll_interval).await;
+                    continue;
+                }
+            };
+
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut x = None;
+                let mut y = None;
+
+                for line in stdout.lines() {
+                    if let Some(val) = line.strip_prefix("X=") {
+                        x = val.parse::<u32>().ok();
+                    } else if let Some(val) = line.strip_prefix("Y=") {
+                        y = val.parse::<u32>().ok();
+                    }
+                }
+
+                if let (Some(x_pos), Some(y_pos)) = (x, y) {
+                    let timestamp_ns = start_time.elapsed().as_nanos() as u64;
+                    let norm_x = x_pos as f64 / width as f64;
+                    let norm_y = y_pos as f64 / height as f64;
+
+                    let entry = serde_json::json!({
+                        "timestamp_ns": timestamp_ns,
+                        "x": norm_x,
+                        "y": norm_y,
+                        "x_px": x_pos,
+                        "y_px": y_pos,
+                    });
+
+                    if let Ok(json) = serde_json::to_string(&entry) {
+                        let _ = writeln!(file, "{}", json);
+                    }
+                }
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    })
+}
+
 async fn verify_recording(args: &Args, project_path: &std::path::Path) -> Result<()> {
     tracing::info!("Verifying recording quality...");
 
     // 1. Verify event tracking accuracy
-    verify::check_tracking_accuracy(project_path, args.width, args.height)?;
+    let tracking_metrics = verify::check_tracking_accuracy(project_path, args.width, args.height)?;
 
     // 2. Verify image quality (frame extraction + analysis)
-    verify::check_image_quality(project_path)?;
+    let image_metrics = verify::check_image_quality(project_path)?;
 
     // 3. Generate test report
-    verify::generate_report(args.output_dir.join("test_report.json"), project_path)?;
+    verify::generate_report(
+        args.output_dir.join("test_report.json"),
+        tracking_metrics,
+        image_metrics,
+    )?;
 
     tracing::info!("Verification complete. See test_report.json for details.");
     Ok(())

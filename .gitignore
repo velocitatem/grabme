@@ -45,3 +45,8 @@ tmp/
 
 ./recording/
 drift_test_output/
+vdesktop_test_output/
+**/vdesktop_test_output/
+recording/
+repro_cursor/
+session-*.md
