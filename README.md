@@ -1,8 +1,8 @@
 # GrabMe
 
-GrabMe is a Linux-first screen recorder/editor that captures raw media plus
-input metadata, then exports polished output through a timeline-driven render
-pipeline.
+GrabMe is a cross-platform screen recorder/editor architecture that captures raw
+media plus input metadata, then exports polished output through a
+timeline-driven render pipeline.
 
 ## What is implemented
 
@@ -22,7 +22,7 @@ pipeline.
 - Platform abstraction split into:
   - `grabme-platform-core` (shared contracts)
   - `grabme-platform-linux` (active implementation)
-  - `grabme-platform-windows` / `grabme-platform-macos` (compile-safe scaffolds)
+  - `grabme-platform-windows` / `grabme-platform-macos` (in progress)
 
 ## Quick start
 
@@ -43,10 +43,14 @@ cargo check --workspace
 cargo test -p grabme-project-model -p grabme-input-tracker -p grabme-capture-engine -p grabme-render-engine
 ```
 
-## Documentation
+## Wiki
 
-- `docs/architecture.md`
-- `docs/linux-capture.md`
-- `docs/export-pipeline.md`
-- `docs/data-contracts.md`
-- `docs/roadmap.md`
+Run a local wiki server:
+
+```bash
+cargo install mdbook
+mdbook serve docs
+```
+
+Primary docs are organized in `docs/src/SUMMARY.md` and rendered from the
+existing documentation files.

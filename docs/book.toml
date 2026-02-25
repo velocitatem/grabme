@@ -1,0 +1,14 @@
+[book]
+authors = ["GrabMe Contributors"]
+language = "en"
+multilingual = false
+src = "src"
+title = "GrabMe Wiki"
+
+[build]
+build-dir = "../target/wiki"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/grabme/grabme"

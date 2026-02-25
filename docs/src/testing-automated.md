@@ -1,0 +1,1 @@
+{{#include ../testing-automated.md}}
