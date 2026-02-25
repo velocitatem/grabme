@@ -106,7 +106,7 @@ pub fn create_quality_pattern(width: u32, height: u32) -> RgbImage {
     let checker_size = 20u32;
     for y in (0..height / 3).step_by(checker_size as usize) {
         for x in (0..width / 3).step_by(checker_size as usize) {
-            let color = if (x / checker_size + y / checker_size) % 2 == 0 {
+            let color = if (x / checker_size + y / checker_size).is_multiple_of(2) {
                 Rgb([200, 200, 200])
             } else {
                 Rgb([50, 50, 50])

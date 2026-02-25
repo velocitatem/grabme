@@ -332,7 +332,7 @@ pub fn check_image_quality(project_path: &Path) -> Result<ImageQualityMetrics> {
                 brightness_values.push(brightness);
 
                 // Check for corruption (all black or all white)
-                if brightness < 5.0 || brightness > 250.0 {
+                if !(5.0..=250.0).contains(&brightness) {
                     has_corruption = true;
                     tracing::warn!(
                         "Potential corruption in {}: brightness {}",
