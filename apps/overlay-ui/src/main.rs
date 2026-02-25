@@ -1463,10 +1463,8 @@ fn remap_pointer_events(
         .filter_map(|event| {
             let remap_point = |x: f64, y: f64| -> Option<(f64, f64)> {
                 let (mx, my) = map_pointer_to_recorded_monitor(x, y, recording, pointer_space)?;
-                if mx < -EDGE_TOLERANCE
-                    || mx > 1.0 + EDGE_TOLERANCE
-                    || my < -EDGE_TOLERANCE
-                    || my > 1.0 + EDGE_TOLERANCE
+                if !(-EDGE_TOLERANCE..=1.0 + EDGE_TOLERANCE).contains(&mx)
+                    || !(-EDGE_TOLERANCE..=1.0 + EDGE_TOLERANCE).contains(&my)
                 {
                     return None;
                 }

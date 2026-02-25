@@ -240,7 +240,7 @@ fn start_x11_cursor_polling(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         use std::io::Write;
-        
+
         let mut file = match std::fs::File::create(&log_path) {
             Ok(f) => f,
             Err(e) => {
@@ -249,7 +249,10 @@ fn start_x11_cursor_polling(
             }
         };
 
-        tracing::info!("Started X11 cursor polling fallback -> {}", log_path.display());
+        tracing::info!(
+            "Started X11 cursor polling fallback -> {}",
+            log_path.display()
+        );
 
         let start_time = std::time::Instant::now();
         let poll_interval = Duration::from_millis(16); // ~60Hz
