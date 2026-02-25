@@ -1,0 +1,97 @@
+name: Virtual Desktop Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run nightly at 2am UTC
+    - cron: '0 2 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  vdesktop-tests:
+    name: Virtual Desktop Recording Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav \
+            gstreamer1.0-tools \
+            gstreamer1.0-x \
+            gstreamer1.0-alsa \
+            gstreamer1.0-pulseaudio \
+            libx11-dev \
+            libxrandr-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libevdev-dev \
+            ffmpeg \
+            libdbus-1-dev \
+            pkg-config \
+            xvfb \
+            x11-utils \
+            xdotool \
+            feh
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Build vdesktop-tests
+        run: cargo build -p vdesktop-tests --release
+      
+      - name: Run virtual desktop test suite
+        run: |
+          # Run tests with Xvfb
+          cargo run -p vdesktop-tests --release -- \
+            --display 99 \
+            --width 1920 \
+            --height 1080 \
+            --duration 15 \
+            --output-dir vdesktop_test_output
+      
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vdesktop-test-results
+          path: |
+            vdesktop_test_output/test_report.json
+            vdesktop_test_output/patterns/
+            vdesktop_test_output/*/meta/
+          retention-days: 7
+      
+      - name: Check test report
+        if: always()
+        run: |
+          if [ -f vdesktop_test_output/test_report.json ]; then
+            echo "Test Report:"
+            cat vdesktop_test_output/test_report.json
+            
+            # Check if tests passed
+            if grep -q '"overall_status":"Pass"' vdesktop_test_output/test_report.json; then
+              echo "✅ Tests PASSED"
+              exit 0
+            else
+              echo "❌ Tests FAILED"
+              exit 1
+            fi
+          else
+            echo "❌ Test report not found"
+            exit 1
+          fi

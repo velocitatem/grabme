@@ -52,21 +52,23 @@ async fn main() -> Result<()> {
     tracing::info!("Output: {:?}", args.output_dir);
 
     // 1. Configure Session
-    let mut config = SessionConfig::default();
-    config.name = "drift_test".to_string();
-    config.output_dir = args.output_dir.clone();
-    config.screen = ScreenCaptureConfig {
-        mode: CaptureMode::FullScreen { monitor_index: 0 },
-        hide_cursor: false,
+    let config = SessionConfig {
+        name: "drift_test".to_string(),
+        output_dir: args.output_dir.clone(),
+        screen: ScreenCaptureConfig {
+            mode: CaptureMode::FullScreen { monitor_index: 0 },
+            hide_cursor: false,
+        },
+        audio: AudioCaptureConfig {
+            mic: false,
+            system: false,
+            app_isolation: None,
+            sample_rate: 48000,
+        },
+        fps: 30,
+        pointer_sample_rate_hz: 60,
+        ..Default::default()
     };
-    config.audio = AudioCaptureConfig {
-        mic: false,
-        system: false,
-        app_isolation: None,
-        sample_rate: 48000,
-    };
-    config.fps = 30;
-    config.pointer_sample_rate_hz = 60;
 
     let mut session = CaptureSession::new(config);
 
@@ -134,7 +136,7 @@ async fn main() -> Result<()> {
 }
 
 async fn analyze_results(
-    project_path: &PathBuf,
+    project_path: &std::path::Path,
     expected_corners: &[(u32, u32)],
     width: u32,
     height: u32,

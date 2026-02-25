@@ -1,0 +1,33 @@
+[package]
+name = "vdesktop-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "vdesktop-test"
+path = "src/main.rs"
+
+[dependencies]
+grabme-capture-engine = { workspace = true }
+grabme-project-model = { workspace = true }
+grabme-common = { workspace = true }
+grabme-render-engine = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+
+# Image processing and CV
+image = "0.25"
+imageproc = "0.25"
+rusttype = "0.9"
+
+# Video frame extraction
+opencv = { version = "0.92", features = ["default"], optional = true }
+
+[features]
+default = []
+opencv = ["dep:opencv"]
