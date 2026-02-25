@@ -3,7 +3,14 @@ name = "grabme-project-model"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Core data model for GrabMe projects: events, timelines, viewports, and project metadata"
+readme = "../../README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde = { workspace = true }

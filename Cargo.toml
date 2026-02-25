@@ -23,20 +23,25 @@ rust-version = "1.75"
 authors = ["GrabMe Contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/grabme/grabme"
+homepage = "https://github.com/grabme/grabme"
+documentation = "https://docs.rs/grabme"
+readme = "README.md"
+keywords = ["screen-recorder", "video-editor", "linux", "screencast"]
+categories = ["multimedia::video", "command-line-utilities"]
 
 [workspace.dependencies]
 # Internal crates
-grabme-common = { path = "crates/common" }
-grabme-project-model = { path = "crates/project-model" }
-grabme-platform-core = { path = "crates/platform-core" }
-grabme-capture-engine = { path = "crates/capture-engine" }
-grabme-input-tracker = { path = "crates/input-tracker" }
-grabme-processing-core = { path = "crates/processing-core" }
-grabme-render-engine = { path = "crates/render-engine" }
-grabme-audio-ai = { path = "crates/audio-ai" }
-grabme-platform-linux = { path = "crates/platform-linux" }
-grabme-platform-windows = { path = "crates/platform-windows" }
-grabme-platform-macos = { path = "crates/platform-macos" }
+grabme-common = { version = "0.1.0", path = "crates/common" }
+grabme-project-model = { version = "0.1.0", path = "crates/project-model" }
+grabme-platform-core = { version = "0.1.0", path = "crates/platform-core" }
+grabme-capture-engine = { version = "0.1.0", path = "crates/capture-engine" }
+grabme-input-tracker = { version = "0.1.0", path = "crates/input-tracker" }
+grabme-processing-core = { version = "0.1.0", path = "crates/processing-core" }
+grabme-render-engine = { version = "0.1.0", path = "crates/render-engine" }
+grabme-audio-ai = { version = "0.1.0", path = "crates/audio-ai" }
+grabme-platform-linux = { version = "0.1.0", path = "crates/platform-linux" }
+grabme-platform-windows = { version = "0.1.0", path = "crates/platform-windows" }
+grabme-platform-macos = { version = "0.1.0", path = "crates/platform-macos" }
 
 # Core dependencies
 anyhow = "1.0"

@@ -3,7 +3,14 @@ name = "grabme-platform-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Cross-platform monitor/display contracts for GrabMe"
+readme = "../../README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde = { workspace = true }

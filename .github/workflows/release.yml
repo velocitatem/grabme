@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libevdev-dev \
+            libdbus-1-dev \
+            pkg-config
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Publish grabme-common
+        run: cargo publish -p grabme-common --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-platform-core
+        run: cargo publish -p grabme-platform-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-project-model
+        run: cargo publish -p grabme-project-model --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-processing-core
+        run: cargo publish -p grabme-processing-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-audio-ai
+        run: cargo publish -p grabme-audio-ai --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-platform-linux
+        run: cargo publish -p grabme-platform-linux --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-platform-windows
+        run: cargo publish -p grabme-platform-windows --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-platform-macos
+        run: cargo publish -p grabme-platform-macos --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-input-tracker
+        run: cargo publish -p grabme-input-tracker --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-capture-engine
+        run: cargo publish -p grabme-capture-engine --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-render-engine
+        run: cargo publish -p grabme-render-engine --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index update
+        run: sleep 30
+      
+      - name: Publish grabme-cli
+        run: cargo publish -p grabme-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+
+  create-github-release:
+    name: Create GitHub Release
+    needs: publish-crates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release v${{ steps.version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

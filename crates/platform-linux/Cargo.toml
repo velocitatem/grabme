@@ -3,7 +3,14 @@ name = "grabme-platform-linux"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Linux platform integration: XDG Portal, PipeWire, DBus, and DPI handling for GrabMe"
+readme = "../../README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 grabme-common = { workspace = true }

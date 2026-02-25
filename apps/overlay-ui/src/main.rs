@@ -8,8 +8,12 @@ use grabme_capture_engine::{
 };
 use grabme_platform_linux::{detect_monitors, MonitorInfo};
 use grabme_processing_core::auto_zoom::{AutoZoomAnalyzer, AutoZoomConfig};
-use grabme_project_model::event::parse_events;
-use grabme_project_model::project::{AspectMode, ExportConfig, ExportFormat, LoadedProject};
+use grabme_project_model::event::{
+    parse_events, EventKind, EventStreamHeader, InputEvent, PointerCoordinateSpace,
+};
+use grabme_project_model::project::{
+    AspectMode, ExportConfig, ExportFormat, LoadedProject, RecordingConfig,
+};
 use grabme_project_model::timeline::{CameraKeyframe, EasingFunction, KeyframeSource};
 use grabme_project_model::viewport::Viewport;
 use grabme_render_engine::export::{export_project, ExportJob, ExportProgress};
@@ -24,22 +28,23 @@ use webcam_preview::WebcamPreview;
 // depends on the monitor scale factor.
 
 const BUBBLE_HEIGHT: f32 = 36.0;
-const BUBBLE_EXPANDED_HEIGHT: f32 = 260.0;
-const BUBBLE_WIDTH_IDLE: f32 = 280.0;
-const BUBBLE_WIDTH_RECORDING: f32 = 52.0; // tiny dot while recording
+const BUBBLE_EXPANDED_HEIGHT: f32 = 332.0;
+const BUBBLE_WIDTH_IDLE: f32 = 320.0;
+const BUBBLE_WIDTH_RECORDING: f32 = 138.0;
 const BUBBLE_WIDTH_POST: f32 = 320.0;
 const CIRCLE_RADIUS: f32 = 10.0;
 const PADDING: f32 = 6.0;
-const DROPDOWN_MAX_HEIGHT: f32 = 132.0;
+const DROPDOWN_MAX_HEIGHT: f32 = 220.0;
 
 const RED_IDLE: Color32 = Color32::from_rgb(200, 52, 52);
 const RED_RECORDING: Color32 = Color32::from_rgb(255, 60, 60);
 const RED_PULSE_DIM: Color32 = Color32::from_rgb(140, 30, 30);
-const BG_COLOR: Color32 = Color32::from_rgba_premultiplied(22, 24, 28, 230);
-const BORDER_COLOR: Color32 = Color32::from_rgb(60, 64, 72);
-const TEXT_COLOR: Color32 = Color32::from_rgb(220, 224, 232);
-const TEXT_DIM: Color32 = Color32::from_rgb(140, 148, 160);
-const ACCENT: Color32 = Color32::from_rgb(100, 140, 255);
+const BG_COLOR: Color32 = Color32::from_rgba_premultiplied(245, 248, 252, 242);
+const BG_EXPANDED_COLOR: Color32 = Color32::from_rgba_premultiplied(236, 242, 250, 230);
+const BORDER_COLOR: Color32 = Color32::from_rgb(197, 208, 224);
+const TEXT_COLOR: Color32 = Color32::from_rgb(32, 42, 56);
+const TEXT_DIM: Color32 = Color32::from_rgb(97, 112, 132);
+const ACCENT: Color32 = Color32::from_rgb(37, 121, 220);
 
 // ── Timer presets ────────────────────────────────────────────────────────────
 
@@ -160,6 +165,10 @@ struct OverlayApp {
     centered_once: bool,
     menus_open: bool,
     prev_window_size: Vec2,
+    last_window_monitor: Option<usize>,
+    recording_monitor_index: Option<usize>,
+    relocated_for_recording: bool,
+    pre_record_outer_pos: Option<Pos2>,
 }
 
 impl Default for OverlayApp {
@@ -201,6 +210,10 @@ impl Default for OverlayApp {
             centered_once: false,
             menus_open: false,
             prev_window_size: Vec2::new(BUBBLE_WIDTH_IDLE, BUBBLE_HEIGHT),
+            last_window_monitor: None,
+            recording_monitor_index: None,
+            relocated_for_recording: false,
+            pre_record_outer_pos: None,
         }
     }
 }
@@ -299,10 +312,15 @@ impl OverlayApp {
                     self.active_project_path = None;
                     self.stage = Stage::Recording;
                     self.session = Some(session);
+                    self.recording_monitor_index = Some(self.selected_monitor);
+                    self.relocated_for_recording = false;
+                    self.pre_record_outer_pos = None;
 
                     if self.webcam && self.webcam_preview_enabled {
                         if let Err(err) = self.webcam_preview.start() {
-                            self.status = format!("Webcam preview unavailable: {err}");
+                            self.webcam_preview_enabled = false;
+                            self.status =
+                                format!("Webcam preview unavailable: {err} (device may be busy)");
                         }
                     }
                 }
@@ -310,11 +328,13 @@ impl OverlayApp {
                     self.webcam_preview.stop();
                     self.status = format!("Failed: {err}");
                     self.stage = Stage::Idle;
+                    self.recording_monitor_index = None;
                 }
                 Err(err) => {
                     self.webcam_preview.stop();
                     self.status = format!("Failed: {err}");
                     self.stage = Stage::Idle;
+                    self.recording_monitor_index = None;
                 }
             }
         }
@@ -332,16 +352,19 @@ impl OverlayApp {
                     self.active_project_path = Some(path);
                     self.stage = Stage::PostRecord;
                     self.status = "Stopped".to_string();
+                    self.recording_monitor_index = None;
                 }
                 Ok(Err(err)) => {
                     self.webcam_preview.stop();
                     self.status = format!("Stop failed: {err}");
                     self.stage = Stage::Idle;
+                    self.recording_monitor_index = None;
                 }
                 Err(err) => {
                     self.webcam_preview.stop();
                     self.status = format!("Stop failed: {err}");
                     self.stage = Stage::Idle;
+                    self.recording_monitor_index = None;
                 }
             }
         }
@@ -362,12 +385,21 @@ impl OverlayApp {
         let Some(project_path) = self.active_project_path.clone() else {
             return;
         };
+
+        let auto_keyframes = match auto_direct_project(&project_path) {
+            Ok(count) => count,
+            Err(err) => {
+                self.status = format!("Render blocked: Auto-Direct failed ({err})");
+                return;
+            }
+        };
+
         let (tx, rx) = mpsc::channel::<RenderMessage>();
         self.render_receiver = Some(rx);
         self.render_percent = 0.0;
         self.render_eta_secs = 0.0;
         self.stage = Stage::Rendering;
-        self.status = "Rendering...".to_string();
+        self.status = format!("Rendering... ({auto_keyframes} keyframes)");
 
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -517,6 +549,119 @@ impl OverlayApp {
         }
     }
 
+    fn monitor_index_for_point(&self, point: Pos2) -> Option<usize> {
+        if self.monitors.is_empty() {
+            return None;
+        }
+
+        for (idx, monitor) in self.monitors.iter().enumerate() {
+            let left = monitor.x as f32;
+            let top = monitor.y as f32;
+            let right = left + monitor.width as f32;
+            let bottom = top + monitor.height as f32;
+
+            if point.x >= left && point.x < right && point.y >= top && point.y < bottom {
+                return Some(idx);
+            }
+        }
+
+        self.monitors
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                let acx = a.x as f32 + a.width as f32 * 0.5;
+                let acy = a.y as f32 + a.height as f32 * 0.5;
+                let bcx = b.x as f32 + b.width as f32 * 0.5;
+                let bcy = b.y as f32 + b.height as f32 * 0.5;
+
+                let adx = point.x - acx;
+                let ady = point.y - acy;
+                let bdx = point.x - bcx;
+                let bdy = point.y - bcy;
+
+                let ad2 = adx * adx + ady * ady;
+                let bd2 = bdx * bdx + bdy * bdy;
+                ad2.partial_cmp(&bd2).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(idx, _)| idx)
+    }
+
+    fn sync_selected_monitor_from_window(&mut self, ctx: &egui::Context) {
+        if self.stage != Stage::Idle {
+            return;
+        }
+
+        let Some(window_rect) = ctx.input(|i| i.viewport().outer_rect) else {
+            return;
+        };
+
+        let Some(window_monitor) = self.monitor_index_for_point(window_rect.center()) else {
+            return;
+        };
+
+        if self.last_window_monitor != Some(window_monitor) {
+            self.last_window_monitor = Some(window_monitor);
+            self.selected_monitor = window_monitor;
+        }
+    }
+
+    fn maybe_relocate_overlay_for_recording(&mut self, ctx: &egui::Context) {
+        if self.relocated_for_recording {
+            return;
+        }
+
+        let Some(recording_monitor) = self.recording_monitor_index else {
+            return;
+        };
+
+        if self.monitors.len() <= 1 {
+            return;
+        }
+
+        let Some((target_idx, target_monitor)) = self
+            .monitors
+            .iter()
+            .enumerate()
+            .find(|(idx, _)| *idx != recording_monitor)
+        else {
+            return;
+        };
+
+        let current_pos = ctx.input(|i| i.viewport().outer_rect.map(|r| r.left_top()));
+        if self.pre_record_outer_pos.is_none() {
+            self.pre_record_outer_pos = current_pos;
+        }
+
+        let target_size = self.target_window_size();
+        let margin = 20.0;
+        let max_x =
+            (target_monitor.x as f32 + target_monitor.width as f32 - target_size.x - margin)
+                .max(target_monitor.x as f32 + margin);
+        let max_y =
+            (target_monitor.y as f32 + target_monitor.height as f32 - target_size.y - margin)
+                .max(target_monitor.y as f32 + margin);
+        let pos = Pos2::new(
+            (target_monitor.x as f32 + margin).min(max_x),
+            (target_monitor.y as f32 + margin).min(max_y),
+        );
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+
+        self.last_window_monitor = Some(target_idx);
+        self.relocated_for_recording = true;
+    }
+
+    fn maybe_restore_overlay_after_recording(&mut self, ctx: &egui::Context) {
+        if !self.relocated_for_recording {
+            return;
+        }
+
+        if let Some(pos) = self.pre_record_outer_pos.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+        }
+
+        self.relocated_for_recording = false;
+    }
+
     fn target_window_size(&self) -> Vec2 {
         let height = if self.stage == Stage::Idle && self.menus_open {
             BUBBLE_EXPANDED_HEIGHT
@@ -591,7 +736,13 @@ impl eframe::App for OverlayApp {
         self.tick_countdown();
         self.poll_session_tasks();
         self.poll_render_messages();
-        let _ = self.webcam_preview.is_running();
+        let preview_running = self.webcam_preview.is_running();
+        if self.stage == Stage::Recording && self.webcam_preview_enabled && !preview_running {
+            self.webcam_preview_enabled = false;
+            if self.status.is_empty() {
+                self.status = "Webcam preview stopped (device may be in use)".to_string();
+            }
+        }
 
         // Center once on startup.
         if !self.centered_once {
@@ -601,7 +752,15 @@ impl eframe::App for OverlayApp {
             self.centered_once = true;
         }
 
+        if self.stage == Stage::Recording {
+            self.maybe_relocate_overlay_for_recording(ctx);
+        } else {
+            self.maybe_restore_overlay_after_recording(ctx);
+            self.sync_selected_monitor_from_window(ctx);
+        }
+
         // ── Draw ─────────────────────────────────────────────────────────
+        let expanded_background = self.stage == Stage::Idle && self.menus_open;
         self.menus_open = false;
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
@@ -610,17 +769,24 @@ impl eframe::App for OverlayApp {
                 let bubble_rect =
                     Rect::from_min_size(full_rect.min, Vec2::new(full_rect.width(), BUBBLE_HEIGHT));
 
+                let expanded = expanded_background;
+                let card_rect = if expanded { full_rect } else { bubble_rect };
+                let card_rounding = if expanded {
+                    Rounding::same(12.0)
+                } else {
+                    Rounding::same(BUBBLE_HEIGHT / 2.0)
+                };
+                let card_color = if expanded {
+                    BG_EXPANDED_COLOR
+                } else {
+                    BG_COLOR
+                };
+
                 // Background pill
-                ui.painter().rect_filled(
-                    bubble_rect,
-                    Rounding::same(BUBBLE_HEIGHT / 2.0),
-                    BG_COLOR,
-                );
-                ui.painter().rect_stroke(
-                    bubble_rect,
-                    Rounding::same(BUBBLE_HEIGHT / 2.0),
-                    Stroke::new(1.0, BORDER_COLOR),
-                );
+                ui.painter()
+                    .rect_filled(card_rect, card_rounding, card_color);
+                ui.painter()
+                    .rect_stroke(card_rect, card_rounding, Stroke::new(1.0, BORDER_COLOR));
 
                 // Drag the window from anywhere on the background
                 let drag_resp =
@@ -633,7 +799,7 @@ impl eframe::App for OverlayApp {
                     Stage::Idle => self.draw_idle(ui, bubble_rect),
                     Stage::Countdown => self.draw_countdown(ui, bubble_rect),
                     Stage::Starting => self.draw_starting(ui, bubble_rect),
-                    Stage::Recording => self.draw_recording(ui, bubble_rect, ctx),
+                    Stage::Recording => self.draw_recording(ui, bubble_rect),
                     Stage::Stopping => self.draw_stopping(ui, bubble_rect),
                     Stage::PostRecord => self.draw_post_record(ui, bubble_rect),
                     Stage::Rendering => self.draw_rendering(ui, bubble_rect),
@@ -669,58 +835,93 @@ impl OverlayApp {
             self.initiate_recording();
         }
 
-        // Timer dropdown
-        let dd_left = cx + CIRCLE_RADIUS + 10.0;
-        let dd_rect = Rect::from_min_size(
-            Pos2::new(dd_left, rect.top() + 3.0),
-            Vec2::new(72.0, BUBBLE_HEIGHT - 6.0),
+        let row_top = rect.top() + 3.0;
+        let row_height = BUBBLE_HEIGHT - 6.0;
+        let row_bottom = row_top + row_height;
+
+        let left_anchor = cx + CIRCLE_RADIUS + 10.0;
+        let right_anchor = rect.right() - PADDING;
+
+        let cam_btn_w = 30.0;
+        let preview_btn_w = 34.0;
+        let btn_gap = 4.0;
+
+        let preview_rect = Rect::from_min_max(
+            Pos2::new(right_anchor - preview_btn_w, row_top + 2.0),
+            Pos2::new(right_anchor, row_bottom - 2.0),
         );
-        let mut child = ui.child_ui(dd_rect, egui::Layout::left_to_right(egui::Align::Center));
-        let timer_id = child.make_persistent_id("timer_cb");
+        let cam_rect = Rect::from_min_max(
+            Pos2::new(preview_rect.left() - btn_gap - cam_btn_w, row_top + 2.0),
+            Pos2::new(preview_rect.left() - btn_gap, row_bottom - 2.0),
+        );
+
+        let mut timer_width = 64.0;
+        let min_monitor_width = 68.0;
+        let monitor_right = cam_rect.left() - btn_gap;
+        let mut monitor_left = left_anchor + timer_width + btn_gap;
+        let mut monitor_width = monitor_right - monitor_left;
+
+        if monitor_width < min_monitor_width {
+            let needed = min_monitor_width - monitor_width;
+            timer_width = (timer_width - needed).max(48.0);
+            monitor_left = left_anchor + timer_width + btn_gap;
+            monitor_width = monitor_right - monitor_left;
+        }
+
+        monitor_width = monitor_width.max(40.0);
+
+        // Timer dropdown
+        let timer_rect = Rect::from_min_size(
+            Pos2::new(left_anchor, row_top),
+            Vec2::new(timer_width.max(48.0), row_height),
+        );
+        let mut timer_child =
+            ui.child_ui(timer_rect, egui::Layout::left_to_right(egui::Align::Center));
+        let timer_id = timer_child.make_persistent_id("timer_cb");
         egui::ComboBox::from_id_source("timer_cb")
-            .width(56.0)
+            .width((timer_rect.width() - 6.0).max(40.0))
             .height(DROPDOWN_MAX_HEIGHT)
             .selected_text(self.countdown_preset.label())
-            .show_ui(&mut child, |ui: &mut egui::Ui| {
+            .show_ui(&mut timer_child, |ui: &mut egui::Ui| {
                 for preset in CountdownPreset::ALL {
                     ui.selectable_value(&mut self.countdown_preset, preset, preset.label());
                 }
             });
-        let timer_open = child.memory(|m| m.is_popup_open(timer_id.with("popup")));
+        let timer_open = timer_child.memory(|m| m.is_popup_open(timer_id.with("popup")));
 
         // Monitor dropdown
-        let mon_left = dd_left + 76.0;
-        let toggles_left = rect.right() - PADDING - 72.0;
         let mon_rect = Rect::from_min_size(
-            Pos2::new(mon_left, rect.top() + 3.0),
-            Vec2::new(
-                (toggles_left - mon_left - 4.0).max(40.0),
-                BUBBLE_HEIGHT - 6.0,
-            ),
+            Pos2::new(monitor_left, row_top),
+            Vec2::new(monitor_width, row_height),
         );
-        let mut child = ui.child_ui(mon_rect, egui::Layout::left_to_right(egui::Align::Center));
-        let monitor_id = child.make_persistent_id("monitor_cb");
-        let sel_label = self.monitor_label(self.selected_monitor);
+        let mut monitor_child =
+            ui.child_ui(mon_rect, egui::Layout::left_to_right(egui::Align::Center));
+        let monitor_id = monitor_child.make_persistent_id("monitor_cb");
+        let sel_label = ellipsize_label(
+            &self.monitor_label(self.selected_monitor),
+            ((mon_rect.width() / 7.0) as usize).clamp(8, 28),
+        );
         egui::ComboBox::from_id_source("monitor_cb")
-            .width(mon_rect.width() - 8.0)
+            .width((mon_rect.width() - 6.0).max(44.0))
             .height(DROPDOWN_MAX_HEIGHT)
             .selected_text(&sel_label)
-            .show_ui(&mut child, |ui: &mut egui::Ui| {
+            .show_ui(&mut monitor_child, |ui: &mut egui::Ui| {
                 for i in 0..self.monitors.len() {
                     let label = self.monitor_label(i);
                     ui.selectable_value(&mut self.selected_monitor, i, label);
                 }
             });
 
-        let cam_rect = Rect::from_min_size(
-            Pos2::new(toggles_left, rect.top() + 5.0),
-            Vec2::new(30.0, BUBBLE_HEIGHT - 10.0),
-        );
         let cam_resp = ui.interact(cam_rect, ui.id().with("cam_toggle"), Sense::click());
         let cam_color = if self.webcam {
-            ACCENT.linear_multiply(0.9)
+            ACCENT.linear_multiply(0.95)
         } else {
-            Color32::from_rgb(65, 68, 78)
+            Color32::from_rgb(217, 226, 240)
+        };
+        let cam_text_color = if self.webcam {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(74, 92, 116)
         };
         ui.painter()
             .rect_filled(cam_rect, Rounding::same(6.0), cam_color);
@@ -729,7 +930,7 @@ impl OverlayApp {
             egui::Align2::CENTER_CENTER,
             "CAM",
             egui::FontId::proportional(9.0),
-            Color32::WHITE,
+            cam_text_color,
         );
         if cam_resp.clicked() {
             self.webcam = !self.webcam;
@@ -739,17 +940,18 @@ impl OverlayApp {
             }
         }
 
-        let preview_rect = Rect::from_min_size(
-            Pos2::new(toggles_left + 34.0, rect.top() + 5.0),
-            Vec2::new(34.0, BUBBLE_HEIGHT - 10.0),
-        );
         let preview_enabled = self.webcam && self.webcam_preview_enabled;
         let preview_color = if preview_enabled {
-            Color32::from_rgb(86, 170, 250)
+            Color32::from_rgb(69, 156, 242)
         } else if self.webcam {
-            Color32::from_rgb(68, 80, 102)
+            Color32::from_rgb(181, 211, 242)
         } else {
-            Color32::from_rgb(52, 56, 64)
+            Color32::from_rgb(217, 226, 240)
+        };
+        let preview_text_color = if preview_enabled {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(74, 92, 116)
         };
         let preview_resp =
             ui.interact(preview_rect, ui.id().with("preview_toggle"), Sense::click());
@@ -760,7 +962,7 @@ impl OverlayApp {
             egui::Align2::CENTER_CENTER,
             "PIP",
             egui::FontId::proportional(9.0),
-            Color32::WHITE,
+            preview_text_color,
         );
         if preview_resp.clicked() && self.webcam {
             self.webcam_preview_enabled = !self.webcam_preview_enabled;
@@ -768,13 +970,13 @@ impl OverlayApp {
                 self.webcam_preview.stop();
             } else if self.stage == Stage::Recording {
                 if let Err(err) = self.webcam_preview.start() {
-                    self.status = format!("Webcam preview unavailable: {err}");
+                    self.status = format!("Webcam preview unavailable: {err} (device may be busy)");
                     self.webcam_preview_enabled = false;
                 }
             }
         }
 
-        let monitor_open = child.memory(|m| m.is_popup_open(monitor_id.with("popup")));
+        let monitor_open = monitor_child.memory(|m| m.is_popup_open(monitor_id.with("popup")));
         self.menus_open = timer_open || monitor_open;
     }
 
@@ -821,13 +1023,10 @@ impl OverlayApp {
         );
     }
 
-    // ── Recording: tiny pulsing dot (minimised to stay out of capture) ──────
-    //
-    // During recording the overlay shrinks to a small circle so it occupies
-    // minimal screen area. Click the dot to stop.
+    // ── Recording: compact stop control + timer ─────────────────────────────
 
-    fn draw_recording(&mut self, ui: &mut egui::Ui, rect: Rect, ctx: &egui::Context) {
-        let cx = rect.center().x;
+    fn draw_recording(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let cx = rect.left() + PADDING + CIRCLE_RADIUS + 2.0;
         let cy = rect.center().y;
         let elapsed = self.elapsed_secs();
 
@@ -837,18 +1036,27 @@ impl OverlayApp {
         let r = CIRCLE_RADIUS * 0.7;
         ui.painter().circle_filled(Pos2::new(cx, cy), r, color);
 
-        // Tooltip on hover shows elapsed time
+        // Stop button
         let dot_rect = Rect::from_center_size(Pos2::new(cx, cy), Vec2::splat(r * 2.0));
         let resp = ui.interact(dot_rect, ui.id().with("stop_dot"), Sense::click());
         if resp.hovered() {
-            // Show a tooltip with the elapsed time so user knows what's happening
-            egui::show_tooltip_at_pointer(ctx, ui.id().with("rec_tip"), |ui| {
-                ui.label(format!("REC {elapsed:.1}s – click to stop"));
-            });
+            ui.painter().circle_stroke(
+                Pos2::new(cx, cy),
+                r + 1.8,
+                Stroke::new(1.3, RED_RECORDING.linear_multiply(0.9)),
+            );
         }
         if resp.clicked() {
             self.stop_recording();
         }
+
+        ui.painter().text(
+            Pos2::new(cx + CIRCLE_RADIUS + 10.0, cy),
+            egui::Align2::LEFT_CENTER,
+            format!("REC {}", format_elapsed_mm_ss(elapsed)),
+            egui::FontId::proportional(11.0),
+            TEXT_COLOR,
+        );
     }
 
     fn draw_starting(&self, ui: &mut egui::Ui, rect: Rect) {
@@ -927,8 +1135,11 @@ impl OverlayApp {
             Pos2::new(bar_right, cy + bar_h / 2.0),
         );
 
-        ui.painter()
-            .rect_filled(bar_rect, Rounding::same(3.0), Color32::from_rgb(40, 44, 52));
+        ui.painter().rect_filled(
+            bar_rect,
+            Rounding::same(3.0),
+            Color32::from_rgb(212, 222, 236),
+        );
 
         let fill_w = bar_rect.width() * self.render_percent as f32;
         let fill_rect = Rect::from_min_max(
@@ -970,9 +1181,9 @@ impl OverlayApp {
         let resp = ui.interact(btn_rect, ui.id().with(id_str), Sense::click());
 
         let bg = if resp.hovered() {
-            Color32::from_rgb(50, 55, 65)
+            Color32::from_rgb(230, 238, 248)
         } else {
-            Color32::from_rgb(36, 40, 48)
+            Color32::from_rgb(241, 246, 252)
         };
         ui.painter()
             .rect_filled(btn_rect, Rounding::same(h / 2.0), bg);
@@ -999,6 +1210,7 @@ impl OverlayApp {
                     self.active_project_path = None;
                     self.last_export_path = None;
                     self.status = String::new();
+                    self.recording_monitor_index = None;
                 }
                 _ => {}
             }
@@ -1019,6 +1231,23 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     )
 }
 
+fn format_elapsed_mm_ss(elapsed_secs: f64) -> String {
+    let total_secs = elapsed_secs.max(0.0).floor() as u64;
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("{mins:02}:{secs:02}")
+}
+
+fn ellipsize_label(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(3).max(1);
+    let prefix: String = text.chars().take(keep).collect();
+    format!("{prefix}...")
+}
+
 // ── Auto-Director ────────────────────────────────────────────────────────────
 
 fn auto_direct_project(project_path: &Path) -> anyhow::Result<usize> {
@@ -1031,7 +1260,10 @@ fn auto_direct_project(project_path: &Path) -> anyhow::Result<usize> {
     let events =
         parse_events(&events_raw).map_err(|e| anyhow::anyhow!("Failed to parse events: {e}"))?;
 
-    if events.is_empty() {
+    let prepared_events =
+        remap_events_for_auto_director(&events, &events_raw, &loaded.project.recording);
+
+    if prepared_events.is_empty() {
         loaded.timeline.keyframes = vec![CameraKeyframe {
             time_secs: 0.0,
             viewport: Viewport::FULL,
@@ -1040,12 +1272,21 @@ fn auto_direct_project(project_path: &Path) -> anyhow::Result<usize> {
         }];
     } else {
         let config = AutoZoomConfig {
+            dwell_threshold_secs: 1.25,
+            dwell_radius: 0.09,
+            hover_zoom: 0.90,
+            scan_zoom: 1.0,
+            smoothing_window: 5,
+            min_viewport_size: 0.85,
+            dwell_velocity_threshold: 0.12,
             monitor_count: 1,
-            focused_monitor_index: loaded.project.recording.monitor_index,
+            focused_monitor_index: 0,
             ..Default::default()
         };
+
         let analyzer = AutoZoomAnalyzer::new(config);
-        let timeline = analyzer.analyze(&events);
+        let mut timeline = analyzer.analyze(&prepared_events);
+        clamp_timeline_to_visible_bounds(&mut timeline.keyframes, 0.85);
         loaded.timeline.keyframes = timeline.keyframes;
     }
 
@@ -1053,6 +1294,297 @@ fn auto_direct_project(project_path: &Path) -> anyhow::Result<usize> {
         .save()
         .map_err(|e| anyhow::anyhow!("Failed to save timeline: {e}"))?;
     Ok(loaded.timeline.keyframes.len())
+}
+
+fn remap_events_for_auto_director(
+    events: &[InputEvent],
+    raw_events_file: &str,
+    recording: &RecordingConfig,
+) -> Vec<InputEvent> {
+    let header_space = parse_events_header(raw_events_file)
+        .map(|header| header.pointer_coordinate_space)
+        .filter(|space| *space != PointerCoordinateSpace::LegacyUnspecified);
+
+    let preferred_space = header_space.or_else(|| {
+        let space = recording.pointer_coordinate_space;
+        if space == PointerCoordinateSpace::LegacyUnspecified {
+            None
+        } else {
+            Some(space)
+        }
+    });
+
+    let pointer_space = select_pointer_space_for_auto_director(preferred_space, events, recording);
+    remap_pointer_events(events, recording, pointer_space)
+}
+
+fn parse_events_header(raw_events_file: &str) -> Option<EventStreamHeader> {
+    let line = raw_events_file
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('#'))?;
+    serde_json::from_str::<EventStreamHeader>(line.trim_start_matches('#').trim()).ok()
+}
+
+fn select_pointer_space_for_auto_director(
+    preferred: Option<PointerCoordinateSpace>,
+    events: &[InputEvent],
+    recording: &RecordingConfig,
+) -> PointerCoordinateSpace {
+    const MIN_VALID_RATIO: f64 = 0.55;
+
+    if let Some(space) = preferred {
+        if pointer_space_in_bounds_ratio(space, events, recording) >= MIN_VALID_RATIO {
+            return space;
+        }
+    }
+
+    let mut candidates = vec![PointerCoordinateSpace::CaptureNormalized];
+    if recording.monitor_width > 0
+        && recording.monitor_height > 0
+        && recording.virtual_width > 0
+        && recording.virtual_height > 0
+    {
+        candidates.push(PointerCoordinateSpace::VirtualDesktopNormalized);
+        if recording.virtual_x != 0 || recording.virtual_y != 0 {
+            candidates.push(PointerCoordinateSpace::VirtualDesktopRootOrigin);
+        }
+    }
+
+    let mut best = PointerCoordinateSpace::CaptureNormalized;
+    let mut best_score = f64::NEG_INFINITY;
+    for candidate in candidates {
+        let score = pointer_space_score(candidate, events, recording);
+        if score > best_score {
+            best = candidate;
+            best_score = score;
+        }
+    }
+
+    best
+}
+
+fn pointer_space_score(
+    space: PointerCoordinateSpace,
+    events: &[InputEvent],
+    recording: &RecordingConfig,
+) -> f64 {
+    let mut sampled = 0usize;
+    let mut in_bounds = 0usize;
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    let sample_stride = ((events.len() as f64) / 800.0).ceil() as usize;
+    let sample_stride = sample_stride.max(1);
+
+    for (idx, event) in events.iter().enumerate() {
+        if idx % sample_stride != 0 {
+            continue;
+        }
+
+        let Some((x, y)) = event.pointer_position() else {
+            continue;
+        };
+
+        let Some((mx, my)) = map_pointer_to_recorded_monitor(x, y, recording, space) else {
+            continue;
+        };
+
+        sampled += 1;
+        if (0.0..=1.0).contains(&mx) && (0.0..=1.0).contains(&my) {
+            in_bounds += 1;
+            min_x = min_x.min(mx);
+            max_x = max_x.max(mx);
+            min_y = min_y.min(my);
+            max_y = max_y.max(my);
+        }
+    }
+
+    if sampled == 0 {
+        return -1.0;
+    }
+
+    let in_bounds_ratio = in_bounds as f64 / sampled as f64;
+    let span_x = if min_x.is_finite() && max_x.is_finite() {
+        (max_x - min_x).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let span_y = if min_y.is_finite() && max_y.is_finite() {
+        (max_y - min_y).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    in_bounds_ratio * 3.0 + span_x + span_y
+}
+
+fn pointer_space_in_bounds_ratio(
+    space: PointerCoordinateSpace,
+    events: &[InputEvent],
+    recording: &RecordingConfig,
+) -> f64 {
+    let mut sampled = 0usize;
+    let mut in_bounds = 0usize;
+
+    for event in events {
+        let Some((x, y)) = event.pointer_position() else {
+            continue;
+        };
+
+        let Some((mx, my)) = map_pointer_to_recorded_monitor(x, y, recording, space) else {
+            continue;
+        };
+
+        sampled += 1;
+        if (0.0..=1.0).contains(&mx) && (0.0..=1.0).contains(&my) {
+            in_bounds += 1;
+        }
+    }
+
+    if sampled == 0 {
+        0.0
+    } else {
+        in_bounds as f64 / sampled as f64
+    }
+}
+
+fn remap_pointer_events(
+    events: &[InputEvent],
+    recording: &RecordingConfig,
+    pointer_space: PointerCoordinateSpace,
+) -> Vec<InputEvent> {
+    const EDGE_TOLERANCE: f64 = 0.04;
+
+    events
+        .iter()
+        .filter_map(|event| {
+            let remap_point = |x: f64, y: f64| -> Option<(f64, f64)> {
+                let (mx, my) = map_pointer_to_recorded_monitor(x, y, recording, pointer_space)?;
+                if mx < -EDGE_TOLERANCE
+                    || mx > 1.0 + EDGE_TOLERANCE
+                    || my < -EDGE_TOLERANCE
+                    || my > 1.0 + EDGE_TOLERANCE
+                {
+                    return None;
+                }
+                Some((mx.clamp(0.0, 1.0), my.clamp(0.0, 1.0)))
+            };
+
+            let kind = match &event.kind {
+                EventKind::Pointer { x, y } => {
+                    let (nx, ny) = remap_point(*x, *y)?;
+                    EventKind::Pointer { x: nx, y: ny }
+                }
+                EventKind::Click {
+                    button,
+                    state,
+                    x,
+                    y,
+                } => {
+                    let (nx, ny) = remap_point(*x, *y)?;
+                    EventKind::Click {
+                        button: *button,
+                        state: *state,
+                        x: nx,
+                        y: ny,
+                    }
+                }
+                EventKind::Scroll { dx, dy, x, y } => {
+                    let (nx, ny) = remap_point(*x, *y)?;
+                    EventKind::Scroll {
+                        dx: *dx,
+                        dy: *dy,
+                        x: nx,
+                        y: ny,
+                    }
+                }
+                EventKind::Key { code, state } => EventKind::Key {
+                    code: code.clone(),
+                    state: *state,
+                },
+                EventKind::WindowFocus {
+                    window_title,
+                    app_id,
+                } => EventKind::WindowFocus {
+                    window_title: window_title.clone(),
+                    app_id: app_id.clone(),
+                },
+            };
+
+            Some(InputEvent {
+                timestamp_ns: event.timestamp_ns,
+                kind,
+            })
+        })
+        .collect()
+}
+
+fn map_pointer_to_recorded_monitor(
+    x: f64,
+    y: f64,
+    recording: &RecordingConfig,
+    pointer_space: PointerCoordinateSpace,
+) -> Option<(f64, f64)> {
+    match pointer_space {
+        PointerCoordinateSpace::CaptureNormalized | PointerCoordinateSpace::LegacyUnspecified => {
+            Some((x, y))
+        }
+        PointerCoordinateSpace::VirtualDesktopNormalized => {
+            if recording.monitor_width == 0
+                || recording.monitor_height == 0
+                || recording.virtual_width == 0
+                || recording.virtual_height == 0
+            {
+                return Some((x, y));
+            }
+
+            let monitor_w = recording.monitor_width as f64;
+            let monitor_h = recording.monitor_height as f64;
+            let virtual_w = recording.virtual_width as f64;
+            let virtual_h = recording.virtual_height as f64;
+
+            let pixel_x = recording.virtual_x as f64 + x * virtual_w;
+            let pixel_y = recording.virtual_y as f64 + y * virtual_h;
+            Some((
+                (pixel_x - recording.monitor_x as f64) / monitor_w,
+                (pixel_y - recording.monitor_y as f64) / monitor_h,
+            ))
+        }
+        PointerCoordinateSpace::VirtualDesktopRootOrigin => {
+            if recording.monitor_width == 0
+                || recording.monitor_height == 0
+                || recording.virtual_width == 0
+                || recording.virtual_height == 0
+            {
+                return Some((x, y));
+            }
+
+            let monitor_w = recording.monitor_width as f64;
+            let monitor_h = recording.monitor_height as f64;
+            let virtual_w = recording.virtual_width as f64;
+            let virtual_h = recording.virtual_height as f64;
+
+            let pixel_x = x * virtual_w;
+            let pixel_y = y * virtual_h;
+            Some((
+                (pixel_x - recording.monitor_x as f64) / monitor_w,
+                (pixel_y - recording.monitor_y as f64) / monitor_h,
+            ))
+        }
+    }
+}
+
+fn clamp_timeline_to_visible_bounds(keyframes: &mut [CameraKeyframe], min_viewport: f64) {
+    for keyframe in keyframes {
+        let width = keyframe.viewport.w.clamp(min_viewport, 1.0);
+        let height = keyframe.viewport.h.clamp(min_viewport, 1.0);
+        let x = keyframe.viewport.x.clamp(0.0, (1.0 - width).max(0.0));
+        let y = keyframe.viewport.y.clamp(0.0, (1.0 - height).max(0.0));
+        keyframe.viewport = Viewport::new(x, y, width, height);
+    }
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -1086,6 +1618,7 @@ fn main() -> anyhow::Result<()> {
         Box::new(|cc| {
             // Force 1.0 pixels-per-point so egui doesn't scale up on HiDPI.
             cc.egui_ctx.set_pixels_per_point(1.0);
+            cc.egui_ctx.set_visuals(egui::Visuals::light());
             Box::new(OverlayApp::default())
         }),
     )

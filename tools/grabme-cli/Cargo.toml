@@ -3,7 +3,14 @@ name = "grabme-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "GrabMe command-line tool: record, validate, analyze, and export projects"
+readme = "../../README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "grabme"

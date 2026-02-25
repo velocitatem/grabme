@@ -1,0 +1,80 @@
+name: Binary Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: Build Linux Binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libevdev-dev \
+            libdbus-1-dev \
+            pkg-config
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Build release binary
+        run: cargo build --release -p grabme-cli
+      
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      
+      - name: Create tarball
+        run: |
+          mkdir -p dist
+          cp target/release/grabme dist/
+          cp README.md LICENSE-MIT LICENSE-APACHE dist/
+          tar -czf grabme-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz -C dist .
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: grabme-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+
+  upload-release-assets:
+    name: Upload Release Assets
+    needs: build-linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/linux-binary/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Native Rust floating overlay editor for GrabMe"
+publish = false
 
 [[bin]]
 name = "grabme-overlay"
@@ -16,6 +17,7 @@ grabme-processing-core = { workspace = true }
 grabme-project-model = { workspace = true }
 grabme-render-engine = { workspace = true }
 tokio = { workspace = true }
+serde_json = { workspace = true }
 
 grabme-platform-linux = { workspace = true }
 

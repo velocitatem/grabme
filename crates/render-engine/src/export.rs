@@ -904,7 +904,7 @@ fn select_cursor_projection(
     recording: &grabme_project_model::project::RecordingConfig,
     smoothed_cursor: &[(u64, f64, f64)],
 ) -> CursorProjection {
-    const EXPLICIT_PROJECTION_FALLBACK_DELTA: f64 = 0.35;
+    const EXPLICIT_PROJECTION_MIN_IN_BOUNDS_RATIO: f64 = 0.55;
 
     let explicit_space = events_header
         .map(|header| header.pointer_coordinate_space)
@@ -923,15 +923,15 @@ fn select_cursor_projection(
     if let Some(space) = explicit_space {
         if let Some(candidate) = projection_candidate_for_space(space, recording) {
             let explicit_score = score_projection_candidate(candidate, smoothed_cursor);
-            if auto_projection.model == CursorCoordinateModel::CaptureNormalized
-                && auto_projection.score > explicit_score + EXPLICIT_PROJECTION_FALLBACK_DELTA
-            {
+            let explicit_in_bounds_ratio = projection_in_bounds_ratio(candidate, smoothed_cursor);
+            if explicit_in_bounds_ratio < EXPLICIT_PROJECTION_MIN_IN_BOUNDS_RATIO {
                 tracing::warn!(
                     explicit_model = candidate.model.as_str(),
                     explicit_score,
+                    explicit_in_bounds_ratio,
                     fallback_model = auto_projection.model.as_str(),
                     fallback_score = auto_projection.score,
-                    "Explicit cursor projection appears inconsistent with sampled points; using best-fit projection"
+                    "Explicit cursor projection maps most samples outside capture bounds; using best-fit projection"
                 );
                 return auto_projection;
             }
@@ -1805,6 +1805,41 @@ fn apply_cursor_projection(
             (*t, px.clamp(0.0, 1.0), py.clamp(0.0, 1.0))
         })
         .collect()
+}
+
+fn projection_in_bounds_ratio(
+    candidate: ProjectionCandidate,
+    smoothed_cursor: &[(u64, f64, f64)],
+) -> f64 {
+    if smoothed_cursor.is_empty() {
+        return 1.0;
+    }
+
+    let sample_stride = ((smoothed_cursor.len() as f64) / 1024.0).ceil() as usize;
+    let sample_stride = sample_stride.max(1);
+
+    let mut sampled = 0usize;
+    let mut in_bounds = 0usize;
+
+    for (_, x, y) in smoothed_cursor.iter().step_by(sample_stride) {
+        let Some((px, py)) = candidate.transform.project(*x, *y) else {
+            continue;
+        };
+        if !px.is_finite() || !py.is_finite() {
+            continue;
+        }
+
+        sampled += 1;
+        if (0.0..=1.0).contains(&px) && (0.0..=1.0).contains(&py) {
+            in_bounds += 1;
+        }
+    }
+
+    if sampled == 0 {
+        0.0
+    } else {
+        in_bounds as f64 / sampled as f64
+    }
 }
 
 fn score_projection_candidate(
@@ -2891,6 +2926,33 @@ mod tests {
         let projection =
             select_cursor_projection(Some(&header), &project.project.recording, &smoothed);
         assert_eq!(projection.model, CursorCoordinateModel::CaptureNormalized);
+    }
+
+    #[test]
+    fn test_select_cursor_projection_respects_explicit_virtual_mapping_when_points_fit() {
+        let project = mock_project_with_geometry(1920, 0, 1920, 1080, 0, 0, 3840, 1080);
+        let header = EventStreamHeader {
+            schema_version: "1.0".to_string(),
+            epoch_monotonic_ns: 0,
+            epoch_wall: "2026-01-01T00:00:00Z".to_string(),
+            capture_width: 1920,
+            capture_height: 1080,
+            scale_factor: 1.0,
+            pointer_sample_rate_hz: 60,
+            pointer_coordinate_space: PointerCoordinateSpace::VirtualDesktopNormalized,
+        };
+        let smoothed = vec![
+            (0u64, 0.50, 0.35),
+            (16_000_000u64, 0.55, 0.40),
+            (32_000_000u64, 0.60, 0.45),
+        ];
+
+        let projection =
+            select_cursor_projection(Some(&header), &project.project.recording, &smoothed);
+        assert_eq!(
+            projection.model,
+            CursorCoordinateModel::VirtualDesktopNormalized
+        );
     }
 
     #[test]

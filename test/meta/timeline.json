@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "keyframes": [
+    {
+      "t": 0.0,
+      "viewport": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 1.0
+      },
+      "easing": "ease_in_out",
+      "source": "auto"
+    }
+  ],
+  "effects": [],
+  "cursor_config": {
+    "smoothing": "ema",
+    "smoothing_factor": 0.3,
+    "size_multiplier": 1.0,
+    "custom_asset": null,
+    "show_click_animation": true
+  },
+  "cuts": []
+}

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "GrabMe Tauri desktop app"
 authors = ["GrabMe Contributors"]
 edition = "2021"
+publish = false
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

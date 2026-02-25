@@ -3,7 +3,14 @@ name = "grabme-capture-engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Screen, webcam, and audio capture engine for GrabMe"
+readme = "../../README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 grabme-common = { workspace = true }
