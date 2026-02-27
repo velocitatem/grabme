@@ -24,10 +24,46 @@ timeline-driven render pipeline.
   - `grabme-platform-linux` (active implementation)
   - `grabme-platform-windows` / `grabme-platform-macos` (in progress)
 
+## Install
+
+### Linux (release binary)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/grabme/grabme/main/scripts/install.sh | bash
+```
+
+Installs `grabme` to `~/.local/bin` by default.
+
+Optional environment variables:
+
+- `GRABME_VERSION=v0.1.0` to pin a version
+- `GRABME_INSTALL_DIR=/usr/local/bin` to change install location
+- `GRABME_REPO=owner/repo` to install from a fork
+
+### Rust users (all platforms)
+
+```bash
+cargo install grabme-cli
+```
+
+### Manual download
+
+Download a release archive from:
+
+- `https://github.com/grabme/grabme/releases`
+
+Each archive ships with a `.sha256` checksum file.
+
 ## Quick start
 
 ```bash
 cargo run -p grabme-cli -- record --name recording --monitor 0 --webcam
+```
+
+List monitor indices first:
+
+```bash
+cargo run -p grabme-cli -- record --list-monitors
 ```
 
 Stop with `Ctrl+C`, then export:
@@ -54,3 +90,16 @@ mdbook serve docs
 
 Primary docs are organized in `docs/src/SUMMARY.md` and rendered from the
 existing documentation files.
+
+## First-run checklist
+
+```bash
+grabme check
+grabme record --list-monitors
+```
+
+Then start a recording with an explicit monitor index:
+
+```bash
+grabme record --monitor 1
+```

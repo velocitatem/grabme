@@ -73,13 +73,15 @@ Triggered by version tags (`v*`):
 
 Triggered by version tags (`v*`):
 
-1. Build Linux x86_64 binary (`cargo build --release`)
-2. Create tarball with:
+1. Build Linux binary target matrix (`cargo build --release --target ...`)
+2. Run packaged binary smoke test (`grabme --help`)
+3. Create tarball with:
    - `grabme` binary
    - `README.md`
    - `LICENSE-MIT`
    - `LICENSE-APACHE`
-3. Upload to GitHub Release as asset
+4. Generate `sha256` checksum for each tarball
+5. Upload tarballs and checksums to GitHub Release as assets
 
 ### 4. Publishable Crates
 
@@ -225,7 +227,8 @@ Future implementations will replace stubs with native backends (Windows Graphics
 2. **Generate API token** at https://crates.io/settings/tokens
 3. **Add token to GitHub Secrets** as `CARGO_REGISTRY_TOKEN`
 4. **Create first release**: `git tag v0.1.0 && git push origin v0.1.0`
-5. **Monitor workflows** at https://github.com/grabme/grabme/actions
+5. **Install via script**: `curl -fsSL https://raw.githubusercontent.com/grabme/grabme/main/scripts/install.sh | bash`
+6. **Monitor workflows** at https://github.com/grabme/grabme/actions
 
 ## Testing CI Locally
 

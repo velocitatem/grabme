@@ -94,9 +94,19 @@ Triggered by version tags (`v*`):
 ### Binary Distribution (`dist.yml`)
 
 Triggered by version tags (`v*`):
-- Builds Linux x86_64 binary
+- Builds Linux release binaries (target matrix)
+- Runs a packaged binary smoke test (`grabme --help`)
 - Creates tarball with binary + licenses
-- Uploads to GitHub Release
+- Generates SHA256 checksum files for each archive
+- Uploads archives and checksums to GitHub Release
+
+### Installer Script
+
+`scripts/install.sh` provides one-command install from GitHub Releases:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/grabme/grabme/main/scripts/install.sh | bash
+```
 
 ## Required Secrets
 

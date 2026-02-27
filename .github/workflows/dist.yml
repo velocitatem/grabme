@@ -12,10 +12,16 @@ jobs:
   build-linux:
     name: Build Linux Binary
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            archive_name: grabme
+            binary_name: grabme
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -30,28 +36,39 @@ jobs:
             libevdev-dev \
             libdbus-1-dev \
             pkg-config
-      
+
       - uses: Swatinem/rust-cache@v2
-      
+
       - name: Build release binary
-        run: cargo build --release -p grabme-cli
-      
+        run: cargo build --release -p grabme-cli --target ${{ matrix.target }}
+
+      - name: Smoke test binary
+        run: ./target/${{ matrix.target }}/release/${{ matrix.binary_name }} --help
+
       - name: Extract version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-      
-      - name: Create tarball
+
+      - name: Create release bundle and checksums
         run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          TARGET="${{ matrix.target }}"
+          BINARY="${{ matrix.binary_name }}"
+          ARCHIVE="grabme-${VERSION}-${TARGET}.tar.gz"
+
           mkdir -p dist
-          cp target/release/grabme dist/
+          cp "target/${TARGET}/release/${BINARY}" "dist/${{ matrix.archive_name }}"
           cp README.md LICENSE-MIT LICENSE-APACHE dist/
-          tar -czf grabme-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz -C dist .
-      
-      - name: Upload artifact
+          tar -czf "${ARCHIVE}" -C dist .
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-binary
-          path: grabme-${{ steps.version.outputs.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
+          name: linux-binary-${{ matrix.target }}
+          path: |
+            grabme-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz
+            grabme-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz.sha256
 
   upload-release-assets:
     name: Upload Release Assets
@@ -75,6 +92,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/linux-binary/*.tar.gz
+            artifacts/**/*.tar.gz
+            artifacts/**/*.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
