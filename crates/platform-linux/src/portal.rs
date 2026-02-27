@@ -72,10 +72,17 @@ pub struct PortalSession {
 }
 
 /// Request a screen capture session through the XDG Desktop Portal.
+///
+/// The portal presents the user with a monitor/window selection dialog.
+/// The `monitor_index` parameter is used only when multiple streams are
+/// returned (e.g. when requesting multiple sources), but in practice the
+/// portal returns exactly one stream per `select_sources` call and the
+/// user has already made the selection — so we always use the first
+/// returned stream to avoid mismatches.
 pub async fn request_screencast(
     source_type: SourceType,
     cursor_mode: CursorMode,
-    monitor_index: usize,
+    _monitor_index: usize,
 ) -> GrabmeResult<PortalSession> {
     tracing::info!(
         source = ?source_type,
@@ -92,12 +99,15 @@ pub async fn request_screencast(
         .await
         .map_err(|e| GrabmeError::platform(format!("Portal CreateSession failed: {e}")))?;
 
+    // `multiple = false` ensures the user selects exactly one source.
+    // This is critical: if `multiple = true` the portal may return streams
+    // in an arbitrary order that does not correspond to monitor_index.
     proxy
         .select_sources(
             &session,
             map_cursor_mode(cursor_mode),
             map_source_type(source_type).into(),
-            false,
+            false, // multiple = false: single source selection
             None,
             PersistMode::DoNot,
         )
@@ -114,15 +124,33 @@ pub async fn request_screencast(
         .map_err(|e| GrabmeError::platform(format!("Portal start response failed: {e}")))?;
 
     let available_streams = streams.streams();
+
+    // Always use the first stream: the portal dialog is where the user
+    // chooses the monitor/window. Indexing into streams by monitor_index
+    // is wrong because the portal returns streams in portal-defined order,
+    // not the OS monitor enumeration order.
     let stream = available_streams
-        .get(monitor_index)
-        .or_else(|| available_streams.first())
-        .ok_or_else(|| GrabmeError::platform("Portal returned no screencast streams"))?;
+        .first()
+        .ok_or_else(|| GrabmeError::platform("Portal returned no screencast streams. User may have cancelled the dialog."))?;
+
+    tracing::info!(
+        node_id = stream.pipe_wire_node_id(),
+        size = ?stream.size(),
+        "Portal screencast stream selected"
+    );
 
     let (width, height) = stream
         .size()
         .map(|(w, h)| (w as u32, h as u32))
         .unwrap_or((1920, 1080));
+
+    if width == 0 || height == 0 {
+        tracing::warn!(
+            width,
+            height,
+            "Portal returned zero-size stream dimensions; will detect actual size from PipeWire"
+        );
+    }
 
     Ok(PortalSession {
         pipewire_node_id: stream.pipe_wire_node_id(),

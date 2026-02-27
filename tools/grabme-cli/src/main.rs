@@ -46,9 +46,13 @@ enum Commands {
         #[arg(long, default_value = "60")]
         fps: u32,
 
-        /// Zero-based monitor index to record
+        /// Zero-based monitor index to record (use --list-monitors to see available monitors)
         #[arg(long, default_value = "0")]
         monitor: usize,
+
+        /// List available monitors and exit without recording
+        #[arg(long)]
+        list_monitors: bool,
 
         /// Disable microphone capture
         #[arg(long)]
@@ -191,6 +195,7 @@ async fn main() -> anyhow::Result<()> {
             output,
             fps,
             monitor,
+            list_monitors,
             no_mic,
             no_system_audio,
             webcam,
@@ -203,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
                 !no_mic,
                 !no_system_audio,
                 webcam,
+                list_monitors,
             )
             .await
         }

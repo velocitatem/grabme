@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use grabme_capture_engine::{
-    AudioCaptureConfig, CaptureMode, CaptureSession, ScreenCaptureConfig, SessionConfig,
+    list_monitors, AudioCaptureConfig, CaptureMode, CaptureSession, ScreenCaptureConfig,
+    SessionConfig,
 };
 
 pub async fn run(
@@ -14,7 +15,61 @@ pub async fn run(
     mic: bool,
     system_audio: bool,
     webcam: bool,
+    list_only: bool,
 ) -> anyhow::Result<()> {
+    // Detect monitors first so we can print the list and validate the index.
+    let monitors = list_monitors().unwrap_or_default();
+
+    if list_only {
+        println!("Available monitors:");
+        if monitors.is_empty() {
+            println!("  (none detected)");
+        }
+        for (i, m) in monitors.iter().enumerate() {
+            println!(
+                "  [{}] {} — {}x{} at ({},{}){}",
+                i,
+                m.name,
+                m.width,
+                m.height,
+                m.x,
+                m.y,
+                if m.primary { " [primary]" } else { "" }
+            );
+        }
+        return Ok(());
+    }
+
+    // Print monitor list so the user can see which index maps to which screen.
+    println!("Available monitors:");
+    if monitors.is_empty() {
+        println!("  (none detected — will use default)");
+    }
+    for (i, m) in monitors.iter().enumerate() {
+        let selected = if i == monitor { " <-- recording this" } else { "" };
+        println!(
+            "  [{}] {} — {}x{} at ({},{}){}{selected}",
+            i,
+            m.name,
+            m.width,
+            m.height,
+            m.x,
+            m.y,
+            if m.primary { " [primary]" } else { "" },
+        );
+    }
+
+    // Validate monitor index before starting.
+    if !monitors.is_empty() && monitor >= monitors.len() {
+        anyhow::bail!(
+            "Monitor index {} is out of range. Available monitors: 0..{}. \
+             Use `grabme record --list-monitors` to see all monitors.",
+            monitor,
+            monitors.len() - 1
+        );
+    }
+
+    println!();
     println!("Starting recording session: {name}");
     println!("  Output: {}", output.display());
     println!("  FPS: {fps}");

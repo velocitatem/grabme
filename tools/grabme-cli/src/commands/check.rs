@@ -17,16 +17,22 @@ pub fn run() -> anyhow::Result<()> {
     // Check monitors
     let monitors = grabme_platform_linux::detect_monitors()?;
     println!("[OK] Monitors detected: {}", monitors.len());
-    for m in &monitors {
+    for (i, m) in monitors.iter().enumerate() {
         println!(
-            "     {} {}x{} @ {}Hz (scale: {}x) {}",
+            "     [{}] {} — {}x{} at ({},{}) @ {}Hz (scale: {}x){}",
+            i,
             m.name,
             m.width,
             m.height,
+            m.x,
+            m.y,
             m.refresh_rate_hz,
             m.scale_factor,
-            if m.primary { "(primary)" } else { "" }
+            if m.primary { " [primary]" } else { "" }
         );
+    }
+    if !monitors.is_empty() {
+        println!("     Use --monitor <index> with `grabme record` to select a monitor.");
     }
 
     // Check permissions
