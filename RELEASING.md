@@ -105,7 +105,7 @@ Triggered by version tags (`v*`):
 `scripts/install.sh` provides one-command install from GitHub Releases:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/grabme/grabme/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/velocitatem/grabme/main/scripts/install.sh | bash
 ```
 
 ## Required Secrets

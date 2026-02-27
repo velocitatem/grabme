@@ -7,6 +7,7 @@ use grabme_capture_engine::{
     SessionConfig,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     name: String,
     output: PathBuf,

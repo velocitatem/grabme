@@ -29,7 +29,7 @@ timeline-driven render pipeline.
 ### Linux (release binary)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/grabme/grabme/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/velocitatem/grabme/main/scripts/install.sh | bash
 ```
 
 Installs `grabme` to `~/.local/bin` by default.
@@ -50,7 +50,7 @@ cargo install grabme-cli
 
 Download a release archive from:
 
-- `https://github.com/grabme/grabme/releases`
+- `https://github.com/velocitatem/grabme/releases`
 
 Each archive ships with a `.sha256` checksum file.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${GRABME_REPO:-grabme/grabme}"
+REPO="${GRABME_REPO:-velocitatem/grabme}"
 INSTALL_DIR="${GRABME_INSTALL_DIR:-$HOME/.local/bin}"
 REQUESTED_VERSION="${GRABME_VERSION:-latest}"
 

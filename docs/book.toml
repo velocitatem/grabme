@@ -11,4 +11,4 @@ build-dir = "../target/wiki"
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/grabme/grabme"
+git-repository-url = "https://github.com/velocitatem/grabme"

@@ -135,8 +135,8 @@ Configure in GitHub repository settings (Settings → Secrets → Actions):
 Add to README.md:
 
 ```markdown
-[![CI](https://github.com/grabme/grabme/actions/workflows/ci.yml/badge.svg)](https://github.com/grabme/grabme/actions/workflows/ci.yml)
-[![Release](https://github.com/grabme/grabme/actions/workflows/release.yml/badge.svg)](https://github.com/grabme/grabme/actions/workflows/release.yml)
+[![CI](https://github.com/velocitatem/grabme/actions/workflows/ci.yml/badge.svg)](https://github.com/velocitatem/grabme/actions/workflows/ci.yml)
+[![Release](https://github.com/velocitatem/grabme/actions/workflows/release.yml/badge.svg)](https://github.com/velocitatem/grabme/actions/workflows/release.yml)
 ```
 
 ## System Dependencies
@@ -169,8 +169,8 @@ cargo package -p grabme-cli --allow-dirty --no-verify
 
 Each published crate includes:
 - **License**: MIT OR Apache-2.0
-- **Repository**: https://github.com/grabme/grabme
-- **Homepage**: https://github.com/grabme/grabme
+- **Repository**: https://github.com/velocitatem/grabme
+- **Homepage**: https://github.com/velocitatem/grabme
 - **Documentation**: https://docs.rs/grabme (auto-generated)
 - **Keywords**: screen-recorder, video-editor, linux, screencast
 - **Categories**: multimedia::video, command-line-utilities
@@ -227,8 +227,8 @@ Future implementations will replace stubs with native backends (Windows Graphics
 2. **Generate API token** at https://crates.io/settings/tokens
 3. **Add token to GitHub Secrets** as `CARGO_REGISTRY_TOKEN`
 4. **Create first release**: `git tag v0.1.0 && git push origin v0.1.0`
-5. **Install via script**: `curl -fsSL https://raw.githubusercontent.com/grabme/grabme/main/scripts/install.sh | bash`
-6. **Monitor workflows** at https://github.com/grabme/grabme/actions
+5. **Install via script**: `curl -fsSL https://raw.githubusercontent.com/velocitatem/grabme/main/scripts/install.sh | bash`
+6. **Monitor workflows** at https://github.com/velocitatem/grabme/actions
 
 ## Testing CI Locally
 
@@ -249,8 +249,8 @@ cargo package -p grabme-common --allow-dirty --no-verify
 
 ## Contact & Support
 
-- Issues: https://github.com/grabme/grabme/issues
-- Discussions: https://github.com/grabme/grabme/discussions
+- Issues: https://github.com/velocitatem/grabme/issues
+- Discussions: https://github.com/velocitatem/grabme/discussions
 - Security: See SECURITY.md (if created)
 
 ---

@@ -82,7 +82,7 @@ Protect the `main` branch:
 2. Make a trivial change: `echo "# Test" >> README.md`
 3. Commit and push: `git add . && git commit -m "test: CI pipeline" && git push origin test-ci`
 4. Create a PR on GitHub
-5. Watch CI workflows run: https://github.com/grabme/grabme/actions
+5. Watch CI workflows run: https://github.com/velocitatem/grabme/actions
 
 Expected results:
 - ✅ Rustfmt check passes
@@ -101,10 +101,10 @@ Expected results:
    git tag v0.1.0
    git push origin v0.1.0
    ```
-3. Watch workflows at: https://github.com/grabme/grabme/actions
+3. Watch workflows at: https://github.com/velocitatem/grabme/actions
 4. Verify:
    - ✅ Crates published at https://crates.io/crates/grabme-cli
-   - ✅ GitHub Release created at https://github.com/grabme/grabme/releases
+   - ✅ GitHub Release created at https://github.com/velocitatem/grabme/releases
    - ✅ Linux binary attached to release
 
 ### Dry-run (Test Without Publishing)
@@ -120,8 +120,8 @@ To test release workflow without actually publishing:
 Add to `README.md`:
 
 ```markdown
-[![CI](https://github.com/grabme/grabme/actions/workflows/ci.yml/badge.svg)](https://github.com/grabme/grabme/actions/workflows/ci.yml)
-[![Release](https://github.com/grabme/grabme/actions/workflows/release.yml/badge.svg)](https://github.com/grabme/grabme/actions/workflows/release.yml)
+[![CI](https://github.com/velocitatem/grabme/actions/workflows/ci.yml/badge.svg)](https://github.com/velocitatem/grabme/actions/workflows/ci.yml)
+[![Release](https://github.com/velocitatem/grabme/actions/workflows/release.yml/badge.svg)](https://github.com/velocitatem/grabme/actions/workflows/release.yml)
 [![Crates.io](https://img.shields.io/crates/v/grabme-cli.svg)](https://crates.io/crates/grabme-cli)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 ```
@@ -159,10 +159,10 @@ Add to `README.md`:
 
 ## 🆘 Need Help?
 
-- Check workflow logs: https://github.com/grabme/grabme/actions
+- Check workflow logs: https://github.com/velocitatem/grabme/actions
 - Review `RELEASING.md` for release process
 - Review `DEPLOYMENT.md` for architecture overview
-- Open an issue: https://github.com/grabme/grabme/issues
+- Open an issue: https://github.com/velocitatem/grabme/issues
 
 ---
 
