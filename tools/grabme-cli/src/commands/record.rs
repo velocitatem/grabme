@@ -46,7 +46,11 @@ pub async fn run(
         println!("  (none detected — will use default)");
     }
     for (i, m) in monitors.iter().enumerate() {
-        let selected = if i == monitor { " <-- recording this" } else { "" };
+        let selected = if i == monitor {
+            " <-- recording this"
+        } else {
+            ""
+        };
         println!(
             "  [{}] {} — {}x{} at ({},{}){}{selected}",
             i,

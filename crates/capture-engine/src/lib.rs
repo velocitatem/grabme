@@ -31,6 +31,7 @@ pub use session::*;
 /// Detect and return all connected monitors using the platform backend.
 /// Returns monitors in enumeration order — the index in this list corresponds
 /// to the `--monitor N` argument passed to `grabme record`.
-pub fn list_monitors() -> grabme_common::error::GrabmeResult<Vec<grabme_platform_core::MonitorInfo>> {
+pub fn list_monitors() -> grabme_common::error::GrabmeResult<Vec<grabme_platform_core::MonitorInfo>>
+{
     backend::get_backend().detect_monitors()
 }

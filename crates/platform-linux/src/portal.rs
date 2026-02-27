@@ -129,9 +129,11 @@ pub async fn request_screencast(
     // chooses the monitor/window. Indexing into streams by monitor_index
     // is wrong because the portal returns streams in portal-defined order,
     // not the OS monitor enumeration order.
-    let stream = available_streams
-        .first()
-        .ok_or_else(|| GrabmeError::platform("Portal returned no screencast streams. User may have cancelled the dialog."))?;
+    let stream = available_streams.first().ok_or_else(|| {
+        GrabmeError::platform(
+            "Portal returned no screencast streams. User may have cancelled the dialog.",
+        )
+    })?;
 
     tracing::info!(
         node_id = stream.pipe_wire_node_id(),
