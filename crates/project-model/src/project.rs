@@ -86,12 +86,30 @@ pub struct RecordingConfig {
     #[serde(default)]
     pub virtual_height: u32,
 
+    /// Full monitor layout snapshot at recording start.
+    ///
+    /// This is used by analysis/export features that need per-monitor framing,
+    /// such as cursor-driven monitor following across a multi-monitor capture.
+    #[serde(default)]
+    pub monitors: Vec<RecordedMonitor>,
+
     /// Coordinate-space used by pointer events for this recording.
     #[serde(default)]
     pub pointer_coordinate_space: PointerCoordinateSpace,
 
     /// Audio sample rate.
     pub audio_sample_rate: u32,
+}
+
+/// A monitor geometry snapshot stored in recording metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordedMonitor {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
 }
 
 /// Display server type.
@@ -323,6 +341,7 @@ impl Project {
                 virtual_y: 0,
                 virtual_width: width,
                 virtual_height: height,
+                monitors: vec![],
                 pointer_coordinate_space: PointerCoordinateSpace::LegacyUnspecified,
                 audio_sample_rate: 48000,
             },
@@ -600,6 +619,7 @@ mod tests {
             "virtual_y",
             "virtual_width",
             "virtual_height",
+            "monitors",
             "pointer_coordinate_space",
         ] {
             recording.remove(key);
@@ -617,6 +637,7 @@ mod tests {
         assert_eq!(parsed.recording.virtual_y, 0);
         assert_eq!(parsed.recording.virtual_width, 0);
         assert_eq!(parsed.recording.virtual_height, 0);
+        assert!(parsed.recording.monitors.is_empty());
         assert_eq!(
             parsed.recording.pointer_coordinate_space,
             PointerCoordinateSpace::LegacyUnspecified

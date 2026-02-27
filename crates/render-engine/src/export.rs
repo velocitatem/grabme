@@ -2840,6 +2840,7 @@ mod tests {
             virtual_y: 0,
             virtual_width: 4480,
             virtual_height: 1440,
+            monitors: vec![],
             pointer_coordinate_space: PointerCoordinateSpace::LegacyUnspecified,
             audio_sample_rate: 48_000,
         };
@@ -2870,6 +2871,7 @@ mod tests {
             virtual_y: 0,
             virtual_width: 1920,
             virtual_height: 1080,
+            monitors: vec![],
             pointer_coordinate_space: PointerCoordinateSpace::LegacyUnspecified,
             audio_sample_rate: 48_000,
         };
@@ -2900,6 +2902,7 @@ mod tests {
             virtual_y: 0,
             virtual_width: 7680,
             virtual_height: 2160,
+            monitors: vec![],
             pointer_coordinate_space: PointerCoordinateSpace::LegacyUnspecified,
             audio_sample_rate: 48_000,
         };

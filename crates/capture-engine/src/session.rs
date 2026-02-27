@@ -11,6 +11,7 @@ use grabme_input_tracker::backends::detect_best_backend;
 use grabme_input_tracker::InputTracker;
 use grabme_platform_core::{virtual_desktop_bounds, MonitorInfo};
 use grabme_project_model::event::PointerCoordinateSpace;
+use grabme_project_model::project::RecordedMonitor;
 use grabme_project_model::{LoadedProject, TrackRef};
 
 use crate::backend::{get_backend, CaptureBackend};
@@ -205,11 +206,23 @@ impl CaptureSession {
             project.project.recording.virtual_y = vy;
             project.project.recording.virtual_width = vw;
             project.project.recording.virtual_height = vh;
+            project.project.recording.monitors = monitors
+                .iter()
+                .map(|m| RecordedMonitor {
+                    name: m.name.clone(),
+                    x: m.x,
+                    y: m.y,
+                    width: m.width,
+                    height: m.height,
+                    primary: m.primary,
+                })
+                .collect();
         } else {
             project.project.recording.virtual_x = 0;
             project.project.recording.virtual_y = 0;
             project.project.recording.virtual_width = capture_width;
             project.project.recording.virtual_height = capture_height;
+            project.project.recording.monitors.clear();
         }
 
         project.project.recording.display_server = self.backend.get_display_server();

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use grabme_common::error::{GrabmeError, GrabmeResult};
-use grabme_platform_core::MonitorInfo;
+use grabme_platform_core::{virtual_desktop_bounds, MonitorInfo};
 use grabme_platform_linux::portal::{
     close_session, is_portal_available, request_screencast, CursorMode,
 };
@@ -100,21 +100,23 @@ impl CaptureBackend for LinuxBackend {
                 if monitors.is_empty() {
                     return Err(GrabmeError::capture("No monitors detected for X11 capture"));
                 }
-                let selected_monitor = match config.mode {
-                    CaptureMode::FullScreen { monitor_index } => monitors.get(monitor_index),
-                    _ => monitors.first(),
-                };
+                // X11 reliability mode: always capture the full virtual desktop.
+                // This prevents monitor-index/region drift and enables cursor-driven
+                // monitor following in post processing.
+                let (vx, vy, vw, vh) = virtual_desktop_bounds(&monitors);
+                self.capture_region = Some((vx, vy, vw, vh));
 
-                if let Some(monitor) = selected_monitor {
-                    self.capture_region =
-                        Some((monitor.x, monitor.y, monitor.width, monitor.height));
-                    Ok((monitor.width, monitor.height))
-                } else {
-                    Err(GrabmeError::capture(format!(
-                        "Invalid monitor selection. Available monitors: {}",
-                        monitor_list_for_error(&monitors)
-                    )))
-                }
+                tracing::info!(
+                    virtual_x = vx,
+                    virtual_y = vy,
+                    virtual_width = vw,
+                    virtual_height = vh,
+                    selected_monitor_index = monitor_index,
+                    selected_monitor = ?monitors.get(monitor_index).map(|m| &m.name),
+                    "X11 capture configured for full virtual desktop"
+                );
+
+                Ok((vw, vh))
             }
             _ => Err(GrabmeError::platform(
                 "Unsupported display server for Linux backend (expected Wayland or X11)",

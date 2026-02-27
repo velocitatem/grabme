@@ -137,7 +137,12 @@ pub fn run(
         match camera_style {
             CameraStyle::Production => {
                 println!("  Running production camera analysis (full-frame + click emphasis)...");
-                let timeline = build_production_timeline(&analysis_events);
+                let timeline = build_production_timeline(
+                    &analysis_events,
+                    &events,
+                    events_header.as_ref(),
+                    &project.project.recording,
+                );
                 project.timeline.keyframes = timeline.keyframes;
                 println!(
                     "  Generated {} production keyframes",
@@ -187,8 +192,31 @@ const PRODUCTION_CLICK_HOLD_SECS: f64 = 0.08;
 const PRODUCTION_CLICK_RELEASE_SECS: f64 = 0.22;
 const PRODUCTION_CLICK_COOLDOWN_SECS: f64 = 3.0;
 
-fn build_production_timeline(events: &[InputEvent]) -> Timeline {
-    let mut keyframes = vec![full_keyframe(0.0, EasingFunction::EaseInOut)];
+fn build_production_timeline(
+    events: &[InputEvent],
+    raw_events: &[InputEvent],
+    events_header: Option<&EventStreamHeader>,
+    recording: &RecordingConfig,
+) -> Timeline {
+    let monitor_follow = build_monitor_follow_keyframes(raw_events, events_header, recording);
+    let mut keyframes = if let Some(mut follow) = monitor_follow {
+        if follow.is_empty() {
+            vec![full_keyframe(0.0, EasingFunction::EaseInOut)]
+        } else {
+            follow.sort_by(|a, b| {
+                a.time_secs
+                    .partial_cmp(&b.time_secs)
+                    .unwrap_or(Ordering::Equal)
+            });
+            follow
+        }
+    } else {
+        vec![full_keyframe(0.0, EasingFunction::EaseInOut)]
+    };
+
+    let mut baseline = Timeline::new();
+    baseline.keyframes = normalize_keyframes(keyframes.clone());
+
     if events.is_empty() {
         let mut timeline = Timeline::new();
         timeline.keyframes = keyframes;
@@ -223,7 +251,15 @@ fn build_production_timeline(events: &[InputEvent]) -> Timeline {
         let settle_t = hold_t + PRODUCTION_CLICK_RELEASE_SECS;
         let focus_viewport = centered_square_viewport(*x, *y, PRODUCTION_CLICK_ZOOM_SIZE);
 
-        keyframes.push(full_keyframe(pre_t, EasingFunction::EaseInOut));
+        let pre_viewport = baseline.viewport_at(pre_t);
+        let settle_viewport = baseline.viewport_at(settle_t);
+
+        keyframes.push(CameraKeyframe {
+            time_secs: pre_t,
+            viewport: pre_viewport,
+            easing: EasingFunction::EaseInOut,
+            source: KeyframeSource::Auto,
+        });
         keyframes.push(CameraKeyframe {
             time_secs: click_t,
             viewport: focus_viewport,
@@ -236,7 +272,12 @@ fn build_production_timeline(events: &[InputEvent]) -> Timeline {
             easing: EasingFunction::EaseInOut,
             source: KeyframeSource::Auto,
         });
-        keyframes.push(full_keyframe(settle_t, EasingFunction::EaseInOut));
+        keyframes.push(CameraKeyframe {
+            time_secs: settle_t,
+            viewport: settle_viewport,
+            easing: EasingFunction::EaseInOut,
+            source: KeyframeSource::Auto,
+        });
     }
 
     let mut timeline = Timeline::new();
@@ -301,6 +342,111 @@ fn normalize_keyframes(keyframes: Vec<CameraKeyframe>) -> Vec<CameraKeyframe> {
     }
 
     normalized
+}
+
+fn build_monitor_follow_keyframes(
+    raw_events: &[InputEvent],
+    events_header: Option<&EventStreamHeader>,
+    recording: &RecordingConfig,
+) -> Option<Vec<CameraKeyframe>> {
+    if recording.monitors.len() < 2 {
+        return None;
+    }
+
+    let virtual_w = recording.virtual_width as f64;
+    let virtual_h = recording.virtual_height as f64;
+    if virtual_w <= 0.0 || virtual_h <= 0.0 {
+        return None;
+    }
+
+    // Monitor-follow requires coordinates that are meaningful in virtual-desktop
+    // normalized space. Our Linux tracker emits this by default.
+    let pointer_space = events_header
+        .map(|h| h.pointer_coordinate_space)
+        .unwrap_or(recording.pointer_coordinate_space);
+    if pointer_space != PointerCoordinateSpace::VirtualDesktopNormalized {
+        return None;
+    }
+
+    let first_t = raw_events.first().map(|e| e.timestamp_ns).unwrap_or(0);
+    let mut keyframes = Vec::new();
+    let mut active_monitor: Option<usize> = None;
+    let mut last_switch_t = f64::NEG_INFINITY;
+    const SWITCH_COOLDOWN_SECS: f64 = 0.20;
+
+    for event in raw_events {
+        let Some((x, y)) = event.pointer_position() else {
+            continue;
+        };
+
+        let px = recording.virtual_x as f64 + x.clamp(0.0, 1.0) * virtual_w;
+        let py = recording.virtual_y as f64 + y.clamp(0.0, 1.0) * virtual_h;
+        let monitor_idx = recording.monitors.iter().position(|m| {
+            let left = m.x as f64;
+            let top = m.y as f64;
+            let right = left + m.width as f64;
+            let bottom = top + m.height as f64;
+            px >= left && px < right && py >= top && py < bottom
+        });
+
+        let Some(monitor_idx) = monitor_idx else {
+            continue;
+        };
+
+        if Some(monitor_idx) == active_monitor {
+            continue;
+        }
+
+        let t = event.timestamp_ns.saturating_sub(first_t) as f64 / 1_000_000_000.0;
+        if t - last_switch_t < SWITCH_COOLDOWN_SECS {
+            continue;
+        }
+
+        let m = &recording.monitors[monitor_idx];
+        let vx = recording.virtual_x as f64;
+        let vy = recording.virtual_y as f64;
+
+        let x_norm = ((m.x as f64 - vx) / virtual_w).clamp(0.0, 1.0);
+        let y_norm = ((m.y as f64 - vy) / virtual_h).clamp(0.0, 1.0);
+        let w_norm = (m.width as f64 / virtual_w).clamp(0.01, 1.0);
+        let h_norm = (m.height as f64 / virtual_h).clamp(0.01, 1.0);
+
+        keyframes.push(CameraKeyframe {
+            time_secs: t.max(0.0),
+            viewport: Viewport::new(x_norm, y_norm, w_norm, h_norm),
+            easing: EasingFunction::EaseInOut,
+            source: KeyframeSource::Auto,
+        });
+
+        active_monitor = Some(monitor_idx);
+        last_switch_t = t;
+    }
+
+    if keyframes.is_empty() {
+        // Fallback to primary monitor framing if no pointer samples resolved
+        if let Some(primary) = recording
+            .monitors
+            .iter()
+            .find(|m| m.primary)
+            .or_else(|| recording.monitors.first())
+        {
+            let vx = recording.virtual_x as f64;
+            let vy = recording.virtual_y as f64;
+            keyframes.push(CameraKeyframe {
+                time_secs: 0.0,
+                viewport: Viewport::new(
+                    ((primary.x as f64 - vx) / virtual_w).clamp(0.0, 1.0),
+                    ((primary.y as f64 - vy) / virtual_h).clamp(0.0, 1.0),
+                    (primary.width as f64 / virtual_w).clamp(0.01, 1.0),
+                    (primary.height as f64 / virtual_h).clamp(0.01, 1.0),
+                ),
+                easing: EasingFunction::EaseInOut,
+                source: KeyframeSource::Auto,
+            });
+        }
+    }
+
+    Some(normalize_keyframes(keyframes))
 }
 
 fn adaptive_chunk_secs(requested_secs: f64, events: &[InputEvent]) -> f64 {
@@ -643,7 +789,7 @@ fn parse_cursor_smoothing(raw: &str) -> anyhow::Result<TimelineSmoothingAlgorith
 mod tests {
     use super::*;
     use grabme_project_model::event::MouseButton;
-    use grabme_project_model::project::Project;
+    use grabme_project_model::project::{Project, RecordedMonitor};
 
     #[test]
     fn test_camera_style_parser_accepts_aliases() {
@@ -668,7 +814,9 @@ mod tests {
             InputEvent::pointer(1_000_000_000, 0.6, 0.6),
         ];
 
-        let timeline = build_production_timeline(&events);
+        let project = Project::new("test", 1920, 1080, 60);
+
+        let timeline = build_production_timeline(&events, &events, None, &project.recording);
         assert_eq!(timeline.keyframes.len(), 1);
         assert_eq!(timeline.keyframes[0].viewport, Viewport::FULL);
     }
@@ -687,7 +835,9 @@ mod tests {
             InputEvent::click(1_040_000_000, MouseButton::Left, ButtonState::Up, 0.85, 0.2),
         ];
 
-        let timeline = build_production_timeline(&events);
+        let project = Project::new("test", 1920, 1080, 60);
+
+        let timeline = build_production_timeline(&events, &events, None, &project.recording);
         assert!(timeline.keyframes.len() >= 4);
         assert_eq!(timeline.keyframes[0].time_secs, 0.0);
         assert_eq!(timeline.keyframes[0].viewport, Viewport::FULL);
@@ -725,7 +875,9 @@ mod tests {
             ),
         ];
 
-        let timeline = build_production_timeline(&events);
+        let project = Project::new("test", 1920, 1080, 60);
+
+        let timeline = build_production_timeline(&events, &events, None, &project.recording);
         let zoom_keyframes = timeline
             .keyframes
             .iter()
@@ -838,5 +990,64 @@ mod tests {
 
         let (_mapped, model) = project_events_to_capture_space(&events, None, &project.recording);
         assert_eq!(model, AnalysisPointerModel::CaptureNormalized);
+    }
+
+    #[test]
+    fn test_build_monitor_follow_keyframes_switches_monitors_by_cursor_position() {
+        let mut project = Project::new("follow", 4480, 1440, 60);
+        project.recording.virtual_x = 0;
+        project.recording.virtual_y = 0;
+        project.recording.virtual_width = 4480;
+        project.recording.virtual_height = 1440;
+        project.recording.pointer_coordinate_space =
+            PointerCoordinateSpace::VirtualDesktopNormalized;
+        project.recording.monitors = vec![
+            RecordedMonitor {
+                name: "HDMI-1-0".to_string(),
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                primary: false,
+            },
+            RecordedMonitor {
+                name: "eDP-2".to_string(),
+                x: 1920,
+                y: 0,
+                width: 2560,
+                height: 1440,
+                primary: true,
+            },
+        ];
+
+        // x=0.1 -> HDMI, x=0.8 -> eDP
+        let events = vec![
+            InputEvent::pointer(0, 0.10, 0.50),
+            InputEvent::pointer(600_000_000, 0.80, 0.50),
+        ];
+
+        let header = EventStreamHeader {
+            schema_version: "1.0".to_string(),
+            epoch_monotonic_ns: 0,
+            epoch_wall: "2026-01-01T00:00:00Z".to_string(),
+            capture_width: 4480,
+            capture_height: 1440,
+            scale_factor: 1.0,
+            pointer_sample_rate_hz: 60,
+            pointer_coordinate_space: PointerCoordinateSpace::VirtualDesktopNormalized,
+        };
+
+        let keyframes =
+            build_monitor_follow_keyframes(&events, Some(&header), &project.recording).unwrap();
+        assert!(keyframes.len() >= 2);
+
+        // First monitor viewport starts at x=0 and spans 1920/4480
+        assert!((keyframes[0].viewport.x - 0.0).abs() < 1e-6);
+        assert!((keyframes[0].viewport.w - (1920.0 / 4480.0)).abs() < 1e-6);
+
+        // A later keyframe should land on the second monitor at x=1920/4480
+        assert!(keyframes
+            .iter()
+            .any(|kf| (kf.viewport.x - (1920.0 / 4480.0)).abs() < 1e-6));
     }
 }
